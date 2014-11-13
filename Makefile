@@ -69,6 +69,7 @@ SRCS =  src/main.c \
 	src/access.c \
 	src/dtable.c \
 	src/tcp.c \
+	src/udp.c \
 	src/http.c \
 	src/notify.c \
 	src/file.c \

@@ -656,6 +656,7 @@ udp_mcast_mux(http_connection_t *hc, th_dvb_mux_instance_t *tdmi)
   int ok=0;
   char *str;
   char *address;
+  th_subscription_t *s;
   streaming_queue_t sq;
   udp_connection_t *uc = NULL;
 
@@ -665,10 +666,10 @@ udp_mcast_mux(http_connection_t *hc, th_dvb_mux_instance_t *tdmi)
     if ((address = http_arg_get(&hc->hc_req_args, "address"))) {
       ok = 1;
     } else {
-      tvherror("UDP-MULTICAST", "No address supplied in udp multicast request");
+      tvhlog(LOG_ERR, "UDP-MULTICAST", "No address supplied in udp multicast request");
     }
   } else {
-    tvherror("UDP-MULTICAST", "No port supplied in udp multicast request");
+    tvhlog(LOG_ERR, "UDP-MULTICAST", "No port supplied in udp multicast request");
   }
 
   if (ok) {
@@ -676,13 +677,13 @@ udp_mcast_mux(http_connection_t *hc, th_dvb_mux_instance_t *tdmi)
     if (uc != NULL) {
       int reuse = 1;
       if (setsockopt(uc->fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse))) {
-         tvherror("UDP-MULTICAST", "failed to reuse address for socket [%s]", strerror(errno));
+         tvhlog(LOG_ERR, "UDP-MULTICAST", "failed to reuse address for socket [%s]", strerror(errno));
          udp_close(uc);
          ok = 0;
       }
       /* Bind */
       if (ok && bind(uc->fd, (struct sockaddr *)&uc->ip, sizeof(struct sockaddr_in)) == -1) {
-        tvherror("UDP-MULTICAST", "bind() failed %s", strerror(errno));
+        tvhlog(LOG_ERR, "UDP-MULTICAST", "bind() failed %s", strerror(errno));
         ok = 0;
         udp_close(uc);
       }
@@ -691,7 +692,7 @@ udp_mcast_mux(http_connection_t *hc, th_dvb_mux_instance_t *tdmi)
 
   if (ok) {
     s = dvb_subscription_create_from_tdmi(tdmi, "UDP-MULTICAST", &sq.sq_st,
-                                          addrbuf,
+                                          address,
                                           hc->hc_username,
                                           address);
     if (s) {
@@ -703,11 +704,10 @@ udp_mcast_mux(http_connection_t *hc, th_dvb_mux_instance_t *tdmi)
       pthread_mutex_lock(&global_lock);
       subscription_unsubscribe(s);
     } else {
-      tvherror("UDP-MULTICAST", "Could not create a subscribtion for requested multicast: %s", streaming_code2txt(err));
+      tvhlog(LOG_ERR, "UDP-MULTICAST", "Could not create a subscribtion for requested multicast: %s", streaming_code2txt(err));
     }
-    profile_chain_close(&profile_chain);
   }
-
+  streaming_queue_deinit(&sq);
   return 0;
 }
 
@@ -834,7 +834,11 @@ http_stream(http_connection_t *hc, const char *remain, void *opaque)
     return http_stream_service(hc, service);
 #if ENABLE_LINUXDVB
   } else if(tdmi != NULL) {
-    return http_stream_tdmi(hc, tdmi);
+    if (!strcmp(components[0], "mcast")) {
+      return udp_mcast_mux(hc, tdmi);
+    } else {
+      return http_stream_tdmi(hc, tdmi);
+    }
 #endif
   } else {
     http_error(hc, HTTP_STATUS_BAD_REQUEST);
