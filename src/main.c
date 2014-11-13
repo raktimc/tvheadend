@@ -679,8 +679,7 @@ main(int argc, char **argv)
   timeshift_init();
 #endif
 
-  tcp_server_preinit(opt_ipv6);
-  tcp_server_init();
+  tcp_server_init(opt_ipv6);
   http_server_init();
   webui_init();
 

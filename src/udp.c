@@ -25,6 +25,7 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/ioctl.h>
+#include <unistd.h>
 #include <fcntl.h>
 #include <assert.h>
 #include <arpa/inet.h>
@@ -85,7 +86,7 @@ udp_resolve( udp_connection_t *uc, int receiver )
   }
   freeaddrinfo(ressave);
   if (uc->ip.ss_family != AF_INET && uc->ip.ss_family != AF_INET6) {
-    tvherror(uc->subsystem, "%s - failed to process host '%s'", uc->name, uc->host);
+    tvhlog(LOG_ERR, uc->subsystem, "%s - failed to process host '%s'", uc->name, uc->host);
     return -1;
   }
   return 0;
@@ -175,7 +176,7 @@ udp_bind ( const char *subsystem, const char *name,
 
   /* Open socket */
   if ((fd = tvh_socket(uc->ip.ss_family, SOCK_DGRAM, 0)) == -1) {
-    tvherror(subsystem, "%s - failed to create socket [%s]",
+    tvhlog(LOG_ERR, subsystem, "%s - failed to create socket [%s]",
              name, strerror(errno));
     udp_close(uc);
     return UDP_FATAL_ERROR;
@@ -183,7 +184,7 @@ udp_bind ( const char *subsystem, const char *name,
 
   /* Mark reuse address */
   if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse))) {
-    tvherror(subsystem, "%s - failed to reuse address for socket [%s]",
+    tvhlog(LOG_ERR, subsystem, "%s - failed to reuse address for socket [%s]",
              name, strerror(errno));
     udp_close(uc);
     return UDP_FATAL_ERROR;
@@ -192,7 +193,7 @@ udp_bind ( const char *subsystem, const char *name,
   /* Bind to interface */
   ifindex = udp_ifindex_required(uc) ? udp_get_ifindex(ifname) : 0;
   if (ifindex < 0) {
-    tvherror(subsystem, "%s - could not find interface %s",
+    tvhlog(LOG_ERR, subsystem, "%s - could not find interface %s",
              name, ifname);
     goto error;
   }
@@ -209,7 +210,7 @@ udp_bind ( const char *subsystem, const char *name,
     /* Bind */
     if (bind(fd, (struct sockaddr *)&uc->ip, sizeof(struct sockaddr_in)) == -1) {
       inet_ntop(AF_INET, &IP_AS_V4(uc->ip, addr), buf, sizeof(buf));
-      tvherror(subsystem, "%s - cannot bind %s:%hu [e=%s]",
+      tvhlog(LOG_ERR, subsystem, "%s - cannot bind %s:%hu [e=%s]",
                name, buf, ntohs(IP_AS_V4(uc->ip, port)), strerror(errno));
       goto error;
     }
@@ -222,7 +223,7 @@ udp_bind ( const char *subsystem, const char *name,
       m.imr_ifindex        = ifindex;
 #else
       if (udp_get_ifaddr(fd, ifname, &m.imr_interface) == -1) {
-        tvherror(subsystem, "%s - cannot find ip address for interface %s [e=%s]",
+        tvhlog(LOG_ERR, subsystem, "%s - cannot find ip address for interface %s [e=%s]",
                  name, ifname,  strerror(errno));
         goto error;
       }
@@ -230,7 +231,7 @@ udp_bind ( const char *subsystem, const char *name,
 
       if (setsockopt(fd, udp_get_solip(), IP_ADD_MEMBERSHIP, &m, sizeof(m))) {
         inet_ntop(AF_INET, &m.imr_multiaddr, buf, sizeof(buf));
-        tvhwarn(subsystem, "%s - cannot join %s [%s]",
+        tvhlog(LOG_WARNING, subsystem, "%s - cannot join %s [%s]",
                 name, buf, strerror(errno));
       }
    }
@@ -243,7 +244,7 @@ udp_bind ( const char *subsystem, const char *name,
     /* Bind */
     if (bind(fd, (struct sockaddr *)&uc->ip, sizeof(struct sockaddr_in6)) == -1) {
       inet_ntop(AF_INET6, &IP_AS_V6(uc->ip, addr), buf, sizeof(buf));
-      tvherror(subsystem, "%s - cannot bind %s:%hu [e=%s]",
+      tvhlog(LOG_ERR, subsystem, "%s - cannot bind %s:%hu [e=%s]",
                name, buf, ntohs(IP_AS_V6(uc->ip, port)), strerror(errno));
       goto error;
     }
@@ -255,7 +256,7 @@ udp_bind ( const char *subsystem, const char *name,
 #ifdef SOL_IPV6
       if (setsockopt(fd, SOL_IPV6, IPV6_ADD_MEMBERSHIP, &m, sizeof(m))) {
         inet_ntop(AF_INET, &m.ipv6mr_multiaddr, buf, sizeof(buf));
-        tvhwarn(subsystem, "%s - cannot join %s [%s]",
+        tvhlog(LOG_WARNING, subsystem, "%s - cannot join %s [%s]",
                 name, buf, strerror(errno));
       }
 #else
@@ -267,14 +268,14 @@ udp_bind ( const char *subsystem, const char *name,
 
   addrlen = sizeof(uc->ip);
   if (getsockname(fd, (struct sockaddr *)&uc->ip, &addrlen)) {
-    tvherror(subsystem, "%s - cannot obtain socket name [%s]",
+    tvhlog(LOG_ERR, subsystem, "%s - cannot obtain socket name [%s]",
              name, strerror(errno));
     goto error;
   }
     
   /* Increase RX buffer size */
   if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rxsize, sizeof(rxsize)) == -1)
-    tvhwarn(subsystem, "%s - cannot increase UDP rx buffer size [%s]",
+    tvhlog(LOG_WARNING, subsystem, "%s - cannot increase UDP rx buffer size [%s]",
             name, strerror(errno));
 
   uc->fd = fd;
@@ -351,7 +352,7 @@ udp_connect ( const char *subsystem, const char *name,
 
   /* Open socket */
   if ((fd = tvh_socket(uc->ip.ss_family, SOCK_DGRAM, 0)) == -1) {
-    tvherror(subsystem, "%s - failed to create socket [%s]",
+    tvhlog(LOG_ERR, subsystem, "%s - failed to create socket [%s]",
              name, strerror(errno));
     udp_close(uc);
     return UDP_FATAL_ERROR;
@@ -360,7 +361,7 @@ udp_connect ( const char *subsystem, const char *name,
   /* Bind to interface */
   ifindex = udp_ifindex_required(uc) ? udp_get_ifindex(ifname) : 0;
   if (ifindex < 0) {
-    tvherror(subsystem, "%s - could not find interface %s",
+    tvhlog(LOG_ERR, subsystem, "%s - could not find interface %s",
              name, ifname);
     goto error;
   }
@@ -374,13 +375,13 @@ udp_connect ( const char *subsystem, const char *name,
 #else
       struct in_addr m;
       if (udp_get_ifaddr(fd, ifname, &m) == -1) {
-        tvherror(subsystem, "%s - cannot find ip address for interface %s [e=%s]",
+        tvhlog(LOG_ERR, subsystem, "%s - cannot find ip address for interface %s [e=%s]",
                  name, ifname,  strerror(errno));
         goto error;
       }
 #endif
       if (setsockopt(fd, udp_get_solip(), IP_MULTICAST_IF, &m, sizeof(m)))
-        tvhwarn(subsystem, "%s - cannot set source interface %s [%s]",
+        tvhlog(LOG_WARNING, subsystem, "%s - cannot set source interface %s [%s]",
                 name, ifname, strerror(errno));
     } else {
       struct ipv6_mreq m;
@@ -388,11 +389,11 @@ udp_connect ( const char *subsystem, const char *name,
       m.ipv6mr_interface = ifindex;
 #ifdef SOL_IPV6
       if (setsockopt(fd, SOL_IPV6, IPV6_MULTICAST_IF, &m, sizeof(m))) {
-        tvhwarn(subsystem, "%s - cannot set source interface %s [%s]",
+        tvhlog(LOG_WARNING, subsystem, "%s - cannot set source interface %s [%s]",
                 name, ifname, strerror(errno));
       }
 #else
-      tvherror(subsystem, "IPv6 multicast not supported");
+      tvhlog(LOG_ERR, subsystem, "IPv6 multicast not supported");
       goto error;
 #endif
     }
@@ -400,7 +401,7 @@ udp_connect ( const char *subsystem, const char *name,
 
   /* Increase TX buffer size */
   if (setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &txsize, sizeof(txsize)) == -1)
-    tvhwarn(subsystem, "%s - cannot increase UDP tx buffer size [%s]",
+    tvhlog(LOG_ERR, subsystem, "%s - cannot increase UDP tx buffer size [%s]",
             name, strerror(errno));
 
   uc->fd = fd;
@@ -438,7 +439,7 @@ udp_write( udp_connection_t *uc, const void *buf, size_t len,
                storage->ss_family == AF_INET6 ?
                  sizeof(struct sockaddr_in6) : sizeof(struct sockaddr_in));
     if (r < 0) {
-      if (ERRNO_AGAIN(errno)) {
+      if (errno==EAGAIN || errno==EWOULDBLOCK) {
         usleep(100);
         continue;
       }
@@ -478,7 +479,7 @@ udp_write_queue( udp_connection_t *uc, htsbuf_queue_t *q,
 /* define the syscall - works only for linux */
 #include <linux/unistd.h>
 #ifdef __NR_recvmmsg
-
+/*
 struct mmsghdr {
   struct msghdr msg_hdr;
   unsigned int  msg_len;
@@ -492,7 +493,7 @@ int recvmmsg(int sockfd, struct mmsghdr *msgvec, unsigned int vlen,
 {
   return syscall(__NR_recvmmsg, sockfd, msgvec, vlen, flags, timeout);
 }
-
+*/
 #define CONFIG_RECVMMSG
 
 #endif

@@ -157,7 +157,7 @@ page_static_file(http_connection_t *hc, const char *remain, void *opaque)
  */
 static void
 http_stream_run(http_connection_t *hc, streaming_queue_t *sq,
-		const char *name, muxer_container_type_t mc)
+		const char *name, muxer_container_type_t mc, int isUdp)
 {
   streaming_message_t *sm;
   int run = 1;
@@ -173,10 +173,12 @@ http_stream_run(http_connection_t *hc, streaming_queue_t *sq,
   if(muxer_open_stream(mux, hc->hc_fd))
     run = 0;
 
-  /* reduce timeout on write() for streaming */
-  tp.tv_sec  = 5;
-  tp.tv_usec = 0;
-  setsockopt(hc->hc_fd, SOL_SOCKET, SO_SNDTIMEO, &tp, sizeof(tp));
+  if (!isUdp) {
+    /* reduce timeout on write() for streaming */
+    tp.tv_sec  = 5;
+    tp.tv_usec = 0;
+    setsockopt(hc->hc_fd, SOL_SOCKET, SO_SNDTIMEO, &tp, sizeof(tp));
+  }
 
   while(run) {
     pthread_mutex_lock(&sq->sq_mutex);
@@ -187,17 +189,19 @@ http_stream_run(http_connection_t *hc, streaming_queue_t *sq,
       ts.tv_nsec = tp.tv_usec * 1000;
 
       if(pthread_cond_timedwait(&sq->sq_cond, &sq->sq_mutex, &ts) == ETIMEDOUT) {
-          timeouts++;
-
+        timeouts++;
+        
+        if (!isUdp) {
           //Check socket status
           getsockopt(hc->hc_fd, SOL_SOCKET, SO_ERROR, (char *)&err, &errlen);  
-          if(err) {
-      tvhlog(LOG_DEBUG, "webui",  "Stop streaming %s, client hung up", hc->hc_url_orig);
-      run = 0;
-          }else if(timeouts >= 20) {
-      tvhlog(LOG_WARNING, "webui",  "Stop streaming %s, timeout waiting for packets", hc->hc_url_orig);
-      run = 0;
-          }
+        }
+        if(err) {
+          tvhlog(LOG_DEBUG, "webui",  "Stop streaming %s, client hung up", hc->hc_url_orig);
+          run = 0;
+        }else if(timeouts >= 20) {
+          tvhlog(LOG_WARNING, "webui",  "Stop streaming %s, timeout waiting for packets", hc->hc_url_orig);
+          run = 0;
+        }
       }
       pthread_mutex_unlock(&sq->sq_mutex);
       continue;
@@ -602,7 +606,7 @@ http_stream_service(http_connection_t *hc, service_t *service)
     name = strdupa(service->s_ch ?
                    service->s_ch->ch_name : service->s_nicename);
     pthread_mutex_unlock(&global_lock);
-    http_stream_run(hc, &sq, name, mc);
+    http_stream_run(hc, &sq, name, mc, 0);
     pthread_mutex_lock(&global_lock);
     subscription_unsubscribe(s);
   }
@@ -639,7 +643,7 @@ http_stream_tdmi(http_connection_t *hc, th_dvb_mux_instance_t *tdmi)
 					http_arg_get(&hc->hc_args, "User-Agent"));
   name = strdupa(tdmi->tdmi_identifier);
   pthread_mutex_unlock(&global_lock);
-  http_stream_run(hc, &sq, name, MC_RAW);
+  http_stream_run(hc, &sq, name, MC_RAW, 0);
   pthread_mutex_lock(&global_lock);
   subscription_unsubscribe(s);
 
@@ -700,7 +704,7 @@ udp_mcast_mux(http_connection_t *hc, th_dvb_mux_instance_t *tdmi)
       pthread_mutex_unlock(&global_lock);
       close(hc->hc_fd);
       hc->hc_fd = uc->fd;
-      http_stream_run(hc, &sq, strdupa(tdmi->tdmi_identifier), MC_RAW);
+      http_stream_run(hc, &sq, strdupa(tdmi->tdmi_identifier), MC_RAW, 1);
       pthread_mutex_lock(&global_lock);
       subscription_unsubscribe(s);
     } else {
@@ -768,7 +772,7 @@ http_stream_channel(http_connection_t *hc, channel_t *ch)
   if(s) {
     name = strdupa(ch->ch_name);
     pthread_mutex_unlock(&global_lock);
-    http_stream_run(hc, &sq, name, mc);
+    http_stream_run(hc, &sq, name, mc, 0);
     pthread_mutex_lock(&global_lock);
     subscription_unsubscribe(s);
   }
