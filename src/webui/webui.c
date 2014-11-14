@@ -223,7 +223,8 @@ http_stream_run(http_connection_t *hc, streaming_queue_t *sq,
     case SMT_START:
       if(!started) {
         tvhlog(LOG_DEBUG, "webui",  "Start streaming %s", hc->hc_url_orig);
-        http_output_content(hc, muxer_mime(mux, sm->sm_data));
+        if (!isUdp)
+           http_output_content(hc, muxer_mime(mux, sm->sm_data));
 
         if(muxer_init(mux, sm->sm_data, name) < 0)
           run = 0;
@@ -653,7 +654,7 @@ http_stream_tdmi(http_connection_t *hc, th_dvb_mux_instance_t *tdmi)
 }
 
 static int
-udp_mcast_mux(http_connection_t *hc, th_dvb_mux_instance_t *tdmi)
+udp_mcast_service(http_connection_t *hc, service_t *service)
 {
   int err = 0;
   int port;
@@ -691,20 +692,23 @@ udp_mcast_mux(http_connection_t *hc, th_dvb_mux_instance_t *tdmi)
         ok = 0;
         udp_close(uc);
       }
+      connect(uc->fd, (struct sockaddr *)&uc->ip, sizeof(struct sockaddr_in));
     } else  ok = 0;
   }
 
   if (ok) {
-    s = dvb_subscription_create_from_tdmi(tdmi, "UDP-MULTICAST", &sq.sq_st,
-                                          address,
-                                          hc->hc_username,
-                                          address);
+    s = subscription_create_from_service(service, "UDP-MULTICAST", &sq.sq_st, MC_RAW,
+                                         address,
+                                         hc->hc_username,
+                                         "UDP-MULTICAST");
     if (s) {
-      tvhlog(LOG_INFO, "UDP-MULTICAST", "subscription opened");
+      char* name = strdupa(service->s_ch ?
+                   service->s_ch->ch_name : service->s_nicename);
+      tvhlog(LOG_DEBUG, "UDP-MULTICAST", "subscription opened for %s", name);
       pthread_mutex_unlock(&global_lock);
       close(hc->hc_fd);
       hc->hc_fd = uc->fd;
-      http_stream_run(hc, &sq, strdupa(tdmi->tdmi_identifier), MC_RAW, 1);
+      http_stream_run(hc, &sq, name, MC_RAW, 1);
       pthread_mutex_lock(&global_lock);
       subscription_unsubscribe(s);
     } else {
@@ -824,10 +828,10 @@ http_stream(http_connection_t *hc, const char *remain, void *opaque)
     ch = channel_find_by_identifier(atoi(components[1]));
   } else if(!strcmp(components[0], "channel")) {
     ch = channel_find_by_name(components[1], 0, 0);
-  } else if(!strcmp(components[0], "service")) {
+  } else if(!strcmp(components[0], "service") || !strcmp(components[0], "mcast")) {
     service = service_find_by_identifier(components[1]);
 #if ENABLE_LINUXDVB
-  } else if(!strcmp(components[0], "mux") || !strcmp(components[0], "mcast")) {
+  } else if(!strcmp(components[0], "mux")) {
     tdmi = dvb_mux_find_by_identifier(components[1]);
 #endif
   }
@@ -835,14 +839,14 @@ http_stream(http_connection_t *hc, const char *remain, void *opaque)
   if(ch != NULL) {
     return http_stream_channel(hc, ch);
   } else if(service != NULL) {
-    return http_stream_service(hc, service);
+    if (!strcmp(components[0], "mcast")) {
+       return udp_mcast_service(hc, service);
+    } else {
+      return http_stream_service(hc, service);
+    }
 #if ENABLE_LINUXDVB
   } else if(tdmi != NULL) {
-    if (!strcmp(components[0], "mcast")) {
-      return udp_mcast_mux(hc, tdmi);
-    } else {
-      return http_stream_tdmi(hc, tdmi);
-    }
+    return http_stream_tdmi(hc, tdmi);
 #endif
   } else {
     http_error(hc, HTTP_STATUS_BAD_REQUEST);
