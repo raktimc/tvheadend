@@ -217,9 +217,8 @@ http_stream_run(http_connection_t *hc, streaming_queue_t *sq,
       if(started) {
         muxer_write_pkt(mux, sm->sm_type, sm->sm_data);
         sm->sm_data = NULL;
+        break;
       }
-      break;
-
     case SMT_START:
       if(!started) {
         tvhlog(LOG_DEBUG, "webui",  "Start streaming %s", hc->hc_url_orig);
@@ -267,6 +266,9 @@ http_stream_run(http_connection_t *hc, streaming_queue_t *sq,
       tvhlog(LOG_WARNING, "webui",  "Stop streaming %s, %s", hc->hc_url_orig,
              streaming_code2txt(sm->sm_code));
       run = 0;
+      break;
+    default:
+      tvhlog(LOG_DEBUG, "webui",  "SMT_UNKNOWN: started[%d]", started);
       break;
     }
 
@@ -665,7 +667,6 @@ udp_mcast_service(http_connection_t *hc, service_t *service)
   streaming_queue_t sq;
   udp_connection_t *uc = NULL;
 
-  streaming_queue_init(&sq, SMT_PACKET);
   if ((str = http_arg_get(&hc->hc_req_args, "port"))) {
     port = atol(str);
     if ((address = http_arg_get(&hc->hc_req_args, "address"))) {
@@ -678,7 +679,7 @@ udp_mcast_service(http_connection_t *hc, service_t *service)
   }
 
   if (ok) {
-    uc = udp_connect ("multicast", address, address, port, NULL, 1900);
+    uc = udp_connect ("multicast", address, address, port, NULL, 32000);
     if (uc != NULL) {
       int reuse = 1;
       if (setsockopt(uc->fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse))) {
@@ -697,7 +698,40 @@ udp_mcast_service(http_connection_t *hc, service_t *service)
   }
 
   if (ok) {
-    s = subscription_create_from_service(service, "UDP-MULTICAST", &sq.sq_st, MC_RAW,
+    size_t qsize;
+    int flags;
+    streaming_target_t *gh;
+    streaming_target_t *tsfix;
+    streaming_target_t *st;
+    dvr_config_t *cfg;
+
+    muxer_container_type_t mc;
+    mc = muxer_container_txt2type(http_arg_get(&hc->hc_req_args, "mux"));
+    if(mc == MC_UNKNOWN) {
+      cfg = dvr_config_find_by_name_default("");
+      mc = cfg->dvr_mc;
+    }
+
+    if ((str = http_arg_get(&hc->hc_req_args, "qsize")))
+      qsize = atoll(str);
+    else
+      qsize = 1500000;
+
+    if(mc == MC_PASS || mc == MC_RAW) {
+      streaming_queue_init2(&sq, SMT_PACKET, qsize);
+      gh = NULL;
+      tsfix = NULL;
+      st = &sq.sq_st;
+      flags = SUBSCRIPTION_RAW_MPEGTS;
+    } else {
+      streaming_queue_init2(&sq, 0, qsize);
+      gh = globalheaders_create(&sq.sq_st);
+      tsfix = tsfix_create(gh);
+      st = tsfix;
+      flags = 0;
+    }
+
+    s = subscription_create_from_service(service, "UDP-MULTICAST", st, flags,
                                          address,
                                          hc->hc_username,
                                          "UDP-MULTICAST");
@@ -708,12 +742,18 @@ udp_mcast_service(http_connection_t *hc, service_t *service)
       pthread_mutex_unlock(&global_lock);
       close(hc->hc_fd);
       hc->hc_fd = uc->fd;
-      http_stream_run(hc, &sq, name, MC_RAW, 1);
+      http_stream_run(hc, &sq, name, mc, 1);
       pthread_mutex_lock(&global_lock);
       subscription_unsubscribe(s);
     } else {
       tvhlog(LOG_ERR, "UDP-MULTICAST", "Could not create a subscribtion for requested multicast: %s", streaming_code2txt(err));
     }
+
+   if(gh)
+      globalheaders_destroy(gh);
+
+    if(tsfix)
+      tsfix_destroy(tsfix);
   }
   streaming_queue_deinit(&sq);
   return 0;
