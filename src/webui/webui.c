@@ -740,6 +740,7 @@ udp_mcast_service(http_connection_t *hc, service_t *service)
                    service->s_ch->ch_name : service->s_nicename);
       tvhlog(LOG_DEBUG, "UDP-MULTICAST", "subscription opened for %s", name);
       pthread_mutex_unlock(&global_lock);
+      http_output_html(hc);
       close(hc->hc_fd);
       hc->hc_fd = uc->fd;
       http_stream_run(hc, &sq, name, mc, 1);
