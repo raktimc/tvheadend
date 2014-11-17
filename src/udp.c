@@ -327,7 +327,7 @@ fail:
 }
 
 udp_connection_t *
-udp_connect ( const char *subsystem, const char *name,
+udp_create ( const char *subsystem, const char *name,
               const char *host, int port,
               const char *ifname, int txsize )
 {
@@ -404,6 +404,36 @@ udp_connect ( const char *subsystem, const char *name,
 
   uc->fd = fd;
   return uc;
+
+error:
+  udp_close(uc);
+  return NULL;
+}
+
+udp_connection_t *
+udp_connect ( const char *subsystem, const char *name,
+              const char *host, int port,
+              const char *ifname, int txsize )
+{
+  int reuse = 1;
+  udp_connection_t *uc = udp_create(subsystem, name, host, port, ifname, txsize);
+  if (uc == NULL) return NULL;
+   
+  if (setsockopt(uc->fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse))) {
+    tvherror(subsystem, "failed to set SO_REUSEADDR for socket [%s]", strerror(errno));
+    goto error;
+  }
+  
+  /* Bind */
+  if (bind(uc->fd, (struct sockaddr *)&uc->ip, sizeof(struct sockaddr_in)) == -1) {
+    tvherror(subsystem, "could not bind socket %s", strerror(errno));
+    goto error;
+  }
+
+  if (connect(uc->fd, (struct sockaddr *)&uc->ip, sizeof(struct sockaddr_in)) == -1) {
+    tvherror(subsystem, "could not connect socket %s", strerror(errno));
+    goto error;
+  }
 
 error:
   udp_close(uc);

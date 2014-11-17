@@ -42,6 +42,7 @@
 #include "muxer.h"
 #include "imagecache.h"
 #include "tcp.h"
+#include "udp.h"
 #include "config.h"
 #include "atomic.h"
 #if ENABLE_MPEGTS
@@ -232,7 +233,7 @@ http_stream_postop ( void *tcp_id )
  */
 static void
 http_stream_run(http_connection_t *hc, profile_chain_t *prch,
-		const char *name, th_subscription_t *s)
+		const char *name, th_subscription_t *s, int isUdp)
 {
   streaming_message_t *sm;
   int run = 1;
@@ -248,10 +249,12 @@ http_stream_run(http_connection_t *hc, profile_chain_t *prch,
   if(muxer_open_stream(mux, hc->hc_fd))
     run = 0;
 
-  /* reduce timeout on write() for streaming */
-  tp.tv_sec  = 5;
-  tp.tv_usec = 0;
-  setsockopt(hc->hc_fd, SOL_SOCKET, SO_SNDTIMEO, &tp, sizeof(tp));
+  if (!isUdp) {
+    /* reduce timeout on write() for streaming */
+    tp.tv_sec  = 5;
+    tp.tv_usec = 0;
+    setsockopt(hc->hc_fd, SOL_SOCKET, SO_SNDTIMEO, &tp, sizeof(tp));
+  }
 
   while(!hc->hc_shutdown && run && tvheadend_running) {
     pthread_mutex_lock(&sq->sq_mutex);
@@ -264,13 +267,15 @@ http_stream_run(http_connection_t *hc, profile_chain_t *prch,
       if(pthread_cond_timedwait(&sq->sq_cond, &sq->sq_mutex, &ts) == ETIMEDOUT) {
         timeouts++;
 
-        /* Check socket status */
-        if (getsockopt(hc->hc_fd, SOL_SOCKET, SO_ERROR, (char *)&err, &errlen) || err) {
-          tvhlog(LOG_DEBUG, "webui",  "Stop streaming %s, client hung up", hc->hc_url_orig);
-          run = 0;
-        } else if(timeouts >= grace) {
-          tvhlog(LOG_WARNING, "webui",  "Stop streaming %s, timeout waiting for packets", hc->hc_url_orig);
-          run = 0;
+        if (!isUdp) {
+          /* Check socket status */
+          if (getsockopt(hc->hc_fd, SOL_SOCKET, SO_ERROR, (char *)&err, &errlen) || err) {
+            tvhlog(LOG_DEBUG, "webui",  "Stop streaming %s, client hung up", hc->hc_url_orig);
+            run = 0;
+          } else if(timeouts >= grace) {
+            tvhlog(LOG_WARNING, "webui",  "Stop streaming %s, timeout waiting for packets", hc->hc_url_orig);
+            run = 0;
+          }
         }
       }
       pthread_mutex_unlock(&sq->sq_mutex);
@@ -304,7 +309,9 @@ http_stream_run(http_connection_t *hc, profile_chain_t *prch,
       grace = 10;
       if(!started) {
         tvhlog(LOG_DEBUG, "webui",  "Start streaming %s", hc->hc_url_orig);
-        http_output_content(hc, muxer_mime(mux, sm->sm_data));
+        if (!isUdp) {
+          http_output_content(hc, muxer_mime(mux, sm->sm_data));
+        }
 
         if(muxer_init(mux, sm->sm_data, name) < 0)
           run = 0;
@@ -755,7 +762,7 @@ http_stream_service(http_connection_t *hc, service_t *service, int weight)
     if(s) {
       name = tvh_strdupa(service->s_nicename);
       pthread_mutex_unlock(&global_lock);
-      http_stream_run(hc, &prch, name, s);
+      http_stream_run(hc, &prch, name, s, 0);
       pthread_mutex_lock(&global_lock);
       subscription_unsubscribe(s);
       res = 0;
@@ -764,6 +771,82 @@ http_stream_service(http_connection_t *hc, service_t *service, int weight)
 
   profile_chain_close(&prch);
   http_stream_postop(tcp_id);
+  return res;
+}
+
+static int
+udp_mcast_service(http_connection_t *hc, service_t *service, int weight)
+{
+  th_subscription_t *s;
+  udp_connection_t *uc;
+  profile_t *pro;
+  profile_chain_t prch;
+  const char *str;
+  size_t qsize;
+  const char *name;
+  char* address;
+  int port;
+//  void *tcp_id;
+  int res = HTTP_STATUS_SERVICE;
+
+
+  if ((str = http_arg_get(&hc->hc_req_args, "port"))) {
+    port = atol(str);
+  } else {
+    tvhlog(LOG_ERR, "multicast", "No port supplied in udp multicast request");
+    return res;
+  }
+
+  if (!(address = http_arg_get(&hc->hc_req_args, "address"))) {
+    tvhlog(LOG_ERR, "multicast", "No address supplied in udp multicast request");
+    return res;
+  }
+
+  if (!(uc = udp_connect ("multicast", address, address, port, NULL, 32000))) {
+    tvhlog(LOG_ERR, "multicast", "Could not create a connected udp socket");
+    return res;
+  }
+
+//  if(http_access_verify(hc, ACCESS_ADVANCED_STREAMING))
+//    return HTTP_STATUS_UNAUTHORIZED;
+
+  if(!(pro = profile_find_by_list(hc->hc_access->aa_profiles,
+                                  http_arg_get(&hc->hc_req_args, "profile"),
+                                  "service")))
+    return HTTP_STATUS_NOT_ALLOWED;
+
+//  if((tcp_id = http_stream_preop(hc)) == NULL)
+//    return HTTP_STATUS_NOT_ALLOWED;
+
+  if ((str = http_arg_get(&hc->hc_req_args, "qsize")))
+    qsize = atoll(str);
+  else
+    qsize = 1500000;
+
+  profile_chain_init(&prch, pro, service);
+  if (!profile_chain_open(&prch, NULL, 0, qsize)) {
+
+    s = subscription_create_from_service(&prch, weight ?: 100, "MULTICAST",
+                                         prch.prch_flags | SUBSCRIPTION_STREAMING,
+                                         address,
+				                         hc->hc_username,
+				                         http_arg_get(&hc->hc_args, "User-Agent"));
+    if(s) {
+      name = tvh_strdupa(service->s_nicename);
+      pthread_mutex_unlock(&global_lock);
+      http_output_html(hc);
+      close(hc->hc_fd);
+      hc->hc_fd = uc->fd;
+      http_stream_run(hc, &prch, name, s, 1);
+      pthread_mutex_lock(&global_lock);
+      subscription_unsubscribe(s);
+      res = 0;
+    }
+  }
+
+  profile_chain_close(&prch);
+  udp_close(uc);
+//  http_stream_postop(tcp_id);
   return res;
 }
 
@@ -809,7 +892,7 @@ http_stream_mux(http_connection_t *hc, mpegts_mux_t *mm, int weight)
     if (s) {
       name = tvh_strdupa(s->ths_title);
       pthread_mutex_unlock(&global_lock);
-      http_stream_run(hc, &prch, name, s);
+      http_stream_run(hc, &prch, name, s, 0);
       pthread_mutex_lock(&global_lock);
       subscription_unsubscribe(s);
       res = 0;
@@ -868,7 +951,7 @@ http_stream_channel(http_connection_t *hc, channel_t *ch, int weight)
     if(s) {
       name = tvh_strdupa(channel_get_name(ch));
       pthread_mutex_unlock(&global_lock);
-      http_stream_run(hc, &prch, name, s);
+      http_stream_run(hc, &prch, name, s, 0);
       pthread_mutex_lock(&global_lock);
       subscription_unsubscribe(s);
       res = 0;
@@ -925,7 +1008,7 @@ http_stream(http_connection_t *hc, const char *remain, void *opaque)
     ch = channel_find_by_name(components[1]);
   } else if(!strcmp(components[0], "channel")) {
     ch = channel_find(components[1]);
-  } else if(!strcmp(components[0], "service")) {
+  } else if(!strcmp(components[0], "service") || !strcmp(components[0], "mcast")) {
     service = service_find_by_identifier(components[1]);
 #if ENABLE_MPEGTS
   } else if(!strcmp(components[0], "mux")) {
@@ -937,7 +1020,11 @@ http_stream(http_connection_t *hc, const char *remain, void *opaque)
   if(ch != NULL) {
     return http_stream_channel(hc, ch, weight);
   } else if(service != NULL) {
-    return http_stream_service(hc, service, weight);
+    if (!strcmp(components[0], "mcast")) {
+       return udp_mcast_service(hc, service, weight);
+    } else {
+      return http_stream_service(hc, service, weight);
+    }
 #if ENABLE_MPEGTS
   } else if(mm != NULL) {
     return http_stream_mux(hc, mm, weight);
