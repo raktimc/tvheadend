@@ -216,10 +216,25 @@ http_stream_status ( void *opaque, htsmsg_t *m )
     htsmsg_add_str(m, "user", hc->hc_username);
 }
 
+static void
+udp_mcast_status ( void *opaque, htsmsg_t *m )
+{
+  http_connection_t *hc = opaque;
+  htsmsg_add_str(m, "type", "UDP-MULTICAST");
+  if (hc->hc_username)
+    htsmsg_add_str(m, "user", hc->hc_username);
+}
+
 static inline void *
 http_stream_preop ( http_connection_t *hc )
 {
   return tcp_connection_launch(hc->hc_fd, http_stream_status, hc->hc_access);
+}
+
+static inline void *
+udp_mcast_preop ( http_connection_t *hc )
+{
+  return tcp_connection_launch(hc->hc_fd, udp_mcast_status, hc->hc_access);
 }
 
 static inline void
@@ -228,6 +243,11 @@ http_stream_postop ( void *tcp_id )
   tcp_connection_land(tcp_id);
 }
 
+static inline void
+udp_mcast_postop ( void *tcp_id )
+{
+  tcp_connection_land(tcp_id);
+}
 /**
  * HTTP stream loop
  */
@@ -786,12 +806,14 @@ udp_mcast_service(http_connection_t *hc, service_t *service, int weight)
   const char *name;
   char* address;
   int port;
-//  void *tcp_id;
+  void *tcp_id;
   int res = HTTP_STATUS_SERVICE;
 
 
   if ((str = http_arg_get(&hc->hc_req_args, "port"))) {
     port = atol(str);
+    if (hc->hc_username) free(hc->hc_username);
+    hc->hc_username = strdup(str);
   } else {
     tvhlog(LOG_ERR, "multicast", "No port supplied in udp multicast request");
     return res;
@@ -815,8 +837,8 @@ udp_mcast_service(http_connection_t *hc, service_t *service, int weight)
                                   "service")))
     return HTTP_STATUS_NOT_ALLOWED;
 
-//  if((tcp_id = http_stream_preop(hc)) == NULL)
-//    return HTTP_STATUS_NOT_ALLOWED;
+  if((tcp_id = udp_mcast_preop(hc)) == NULL)
+    return HTTP_STATUS_NOT_ALLOWED;
 
   if ((str = http_arg_get(&hc->hc_req_args, "qsize")))
     qsize = atoll(str);
@@ -826,11 +848,11 @@ udp_mcast_service(http_connection_t *hc, service_t *service, int weight)
   profile_chain_init(&prch, pro, service);
   if (!profile_chain_open(&prch, NULL, 0, qsize)) {
 
-    s = subscription_create_from_service(&prch, weight ?: 100, "MULTICAST",
+    s = subscription_create_from_service(&prch, weight ?: 100, "UDP-MULTICAST",
                                          prch.prch_flags | SUBSCRIPTION_STREAMING,
                                          address,
-				                         hc->hc_username,
-				                         http_arg_get(&hc->hc_args, "User-Agent"));
+		                         hc->hc_username,
+		                         http_arg_get(&hc->hc_args, "User-Agent"));
     if(s) {
       name = tvh_strdupa(service->s_nicename);
       pthread_mutex_unlock(&global_lock);
@@ -846,7 +868,7 @@ udp_mcast_service(http_connection_t *hc, service_t *service, int weight)
 
   profile_chain_close(&prch);
   udp_close(uc);
-//  http_stream_postop(tcp_id);
+  udp_mcast_postop(tcp_id);
   return res;
 }
 
@@ -971,6 +993,7 @@ http_stream_channel(http_connection_t *hc, channel_t *ch, int weight)
  *                          http://tvheadend/stream/channelnumber/<channelnumber>
  *                          http://tvheadend/stream/channelname/<channelname>
  *                          http://tvheadend/stream/service/<servicename>
+ *                          http://tvheadend/stream/mcast/<servicename>
  *                          http://tvheadend/stream/mux/<muxid>
  */
 static int

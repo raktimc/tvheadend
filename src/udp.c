@@ -435,6 +435,7 @@ udp_connect ( const char *subsystem, const char *name,
     goto error;
   }
 
+  return uc;
 error:
   udp_close(uc);
   return NULL;
