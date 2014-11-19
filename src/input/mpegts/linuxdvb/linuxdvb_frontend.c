@@ -288,7 +288,9 @@ linuxdvb_frontend_stop_mux
   if (lfe->lfe_dvr_pipe.wr > 0) {
     tvh_write(lfe->lfe_dvr_pipe.wr, "", 1);
     tvhtrace("linuxdvb", "%s - waiting for dvr thread", buf1);
+    pthread_mutex_unlock(&global_lock);
     pthread_join(lfe->lfe_dvr_thread, NULL);
+    pthread_mutex_lock(&global_lock);
     tvh_pipe_close(&lfe->lfe_dvr_pipe);
     tvhdebug("linuxdvb", "%s - stopped dvr thread", buf1);
   }
