@@ -1,0 +1,127 @@
+#!/usr/bin/python
+# -*- coding: utf-8 -*-
+# 
+# Copyright (C) 2013  Alex Revetchi
+#
+# mcast is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+import urllib
+import urllib2
+import json
+import time
+from optparse import OptionParser
+
+optParser = OptionParser()
+optParser.add_option('--host',  type='string', default='localhost', help='tvheadend web admin address, default: localhost')
+optParser.add_option('--port',  type='int', default=9981, help='tvheadend web admin port, default: 9981')
+optParser.add_option('--sid',   type='int', default=None, help='SID of the service')
+optParser.add_option('--mip',   type='string', default=None, help='Multicast IP used for service muticasting')
+optParser.add_option('--mport', type='int', default=None, help='Multicast port used for service muticasting')
+optParser.add_option('--mux',   type='string', default='pass', help='Mux type: [pass, raw, ..], default: pass')
+optParser.add_option('--file',  type='string', default=None, dest='fname', help='CSV file containing a list of service SIDs and multicast IP and port')
+
+(opts,args) = optParser.parse_args()
+
+def execApiRequest(path):
+	global opts
+	urllib2.urlopen('http://%s:%i%s' % (opts.host, opts.port, path)).read()
+
+def execApiRequestJ(path):
+	global opts
+	try:
+		response = urllib2.urlopen('http://%s:%i%s' % (opts.host, opts.port, path)).read()
+	except:
+		return None
+	return json.loads(response)
+
+def killall():
+	cnns = execApiRequestJ('/api/status/connections')
+	if cnns and 'entries' in cnns:
+		for e in cnns['entries']:
+			if e['type'] == 'UDP-MULTICAST':
+				execApiRequestJ('/api/connections/cancel?'+ urllib.urlencode({'id': e['id']}))
+				time.sleep(0.2)
+	time.sleep(1)
+	cnns = execApiRequestJ('/api/status/connections')
+	if cnns and 'entries' in cnns:
+		ids = [ e['id'] for e in cnns['entries'] if e['type'] == 'UDP-MULTICAST']
+		if len(ids):
+			print 'Failed to stop %i multicast connections ids: %s' % (len(ids), str(ids))
+		else:
+			print 'All multicast connections stopped...'
+
+def check(address, port, cnns=None):
+	uname = '%s:%i' % (address, port)
+	if not cnns:
+		cnns = execApiRequestJ('/api/status/connections')
+	if cnns and 'entries' in cnns:
+		unames = [ e['user'] for e in cnns['entries'] if e['type'] == 'UDP-MULTICAST' ]
+		return uname in unames
+	return None 
+
+def startFromFile(fileName):
+	services = execApiRequestJ('/api/service/list')
+	cnns = execApiRequestJ('/api/status/connections')
+	f = open(fileName, 'r')
+	for line in f:
+		mcast_opts = line.split(',')
+		if mcast_opts and len(mcast_opts) > 5:
+			ipport = mcast_opts[5].split(':')
+			start(int(float(mcast_opts[4])), ipport[0], int(ipport[1]), 'pass', services, cnns)
+#		print '%s %s' % (mcast_opts[4], mcast_opts[5])
+
+def start(sid, address, port, mux, services=None, cnns=None):
+	busy = check(address, port, cnns)
+	if busy or busy == None:
+		print 'Supplied address: %s and port: %i already in use, or could not check...' % (address, port)
+		return
+	if not services:
+		services = execApiRequestJ('/api/service/list')
+	if not services or not 'entries' in services:
+		print 'Could not fetch service list from the server...'
+		return
+
+	enabled = False
+	uuid = None
+	for svc in services['entries']:
+		for param in svc['params']:
+			if param['id'] == 'enabled' and bool(param['value']):
+				enabled = True
+			if param['id'] == 'sid' and sid == int(param['value']):
+				uuid = svc['id'].encode("utf-8")
+		if uuid:
+			if enabled:
+				print 'Starting %s sid: %i ...' % (svc['text'].encode("utf-8"), sid)
+				execApiRequest(('/stream/mcast/%s?' % uuid) + urllib.urlencode({'address': address, 'port': port, 'mux': mux}))
+				time.sleep(0.3)
+#				print json.dumps(svc, indent=4)
+			else:
+				print 'Service with sid: %i is disabled...' % sid
+			return
+
+for action in args:
+	if action == 'killall':
+		killall()
+	elif action == 'start':
+		if opts.fname:
+			startFromFile(opts.fname)
+		elif not opts.sid or not opts.mip or not opts.mport:
+			print 'Not enough parameters provided...'
+			exit(0)
+		else:
+			start(opts.sid, opts.mip, opts.mport, opts.mux)	
+
+#print json.dumps(svcList, indent=4)
+
+exit(0)
