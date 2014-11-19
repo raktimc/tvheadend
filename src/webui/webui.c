@@ -809,7 +809,6 @@ udp_mcast_service(http_connection_t *hc, service_t *service, int weight)
   void *tcp_id;
   int res = HTTP_STATUS_SERVICE;
 
-
   if ((str = http_arg_get(&hc->hc_req_args, "port"))) {
     port = atol(str);
     if (hc->hc_username) free(hc->hc_username);
@@ -823,6 +822,11 @@ udp_mcast_service(http_connection_t *hc, service_t *service, int weight)
     tvhlog(LOG_ERR, "multicast", "No address supplied in udp multicast request");
     return res;
   }
+
+  size_t unlen = strlen(str) + strlen(address) + 2;
+  if (hc->hc_username) free(hc->hc_username);
+  hc->hc_username = malloc(unlen);
+  snprintf(hc->hc_username, unlen, "%s:%s", address, str);
 
   if (!(uc = udp_connect ("multicast", address, address, port, NULL, 32000))) {
     tvhlog(LOG_ERR, "multicast", "Could not create a connected udp socket");
