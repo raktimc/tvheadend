@@ -39,10 +39,7 @@ def execApiRequest(path):
 
 def execApiRequestJ(path):
 	global opts
-	try:
-		response = urllib2.urlopen('http://%s:%i%s' % (opts.host, opts.port, path)).read()
-	except:
-		return None
+	response = urllib2.urlopen('http://%s:%i%s' % (opts.host, opts.port, path)).read()
 	return json.loads(response)
 
 def killall():
@@ -51,7 +48,7 @@ def killall():
 		for e in cnns['entries']:
 			if e['type'] == 'UDP-MULTICAST':
 				execApiRequestJ('/api/connections/cancel?'+ urllib.urlencode({'id': e['id']}))
-				time.sleep(0.2)
+				time.sleep(0.3)
 	time.sleep(1)
 	cnns = execApiRequestJ('/api/status/connections')
 	if cnns and 'entries' in cnns:
@@ -70,7 +67,7 @@ def check(address, port, cnns=None):
 		return uname in unames
 	return None 
 
-def startFromFile(fileName):
+def startFromFile(fileName, mux='pass'):
 	services = execApiRequestJ('/api/service/list')
 	cnns = execApiRequestJ('/api/status/connections')
 	f = open(fileName, 'r')
@@ -110,18 +107,18 @@ def start(sid, address, port, mux, services=None, cnns=None):
 				print 'Service with sid: %i is disabled...' % sid
 			return
 
-for action in args:
-	if action == 'killall':
-		killall()
-	elif action == 'start':
-		if opts.fname:
-			startFromFile(opts.fname)
-		elif not opts.sid or not opts.mip or not opts.mport:
-			print 'Not enough parameters provided...'
-			exit(0)
-		else:
-			start(opts.sid, opts.mip, opts.mport, opts.mux)	
-
-#print json.dumps(svcList, indent=4)
+try:
+	for action in args:
+		if action == 'killall':
+			killall()
+		elif action == 'start':
+			if opts.fname:
+				startFromFile(opts.fname, opts.mux)
+			elif not opts.sid or not opts.mip or not opts.mport:
+				print 'Not enough parameters provided...'
+			else:
+				start(opts.sid, opts.mip, opts.mport, opts.mux)	
+except Exception as e:
+	print 'Failed: %s' % str(e)
 
 exit(0)
