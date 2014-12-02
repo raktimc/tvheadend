@@ -397,6 +397,9 @@ linuxdvb_frontend_network_list ( mpegts_input_t *mi )
   linuxdvb_frontend_t *lfe = (linuxdvb_frontend_t*)mi;
   const idclass_t     *idc;
 
+  tvhtrace("linuxdvb", "%s: network list for %s",
+           mi->mi_name ?: "", dvb_type2str(lfe->lfe_type));
+
   if (lfe->lfe_type == DVB_TYPE_T)
     idc = &dvb_network_dvbt_class;
   else if (lfe->lfe_type == DVB_TYPE_C)
@@ -1421,6 +1424,7 @@ linuxdvb_frontend_save ( linuxdvb_frontend_t *lfe, htsmsg_t *fe )
   /* Save frontend */
   mpegts_input_save((mpegts_input_t*)lfe, m);
   htsmsg_add_str(m, "type", dvb_type2str(lfe->lfe_type));
+  htsmsg_add_str(m, "uuid", idnode_uuid_as_str(&lfe->ti_id));
   if (lfe->lfe_satconf) {
     htsmsg_t *s = htsmsg_create_map();
     linuxdvb_satconf_save(lfe->lfe_satconf, s);

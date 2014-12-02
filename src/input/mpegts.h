@@ -434,6 +434,7 @@ struct mpegts_service
 
   uint32_t s_dvb_channel_num;
   uint16_t s_dvb_channel_minor;
+  uint8_t  s_dvb_channel_dtag;
   uint16_t s_dvb_service_id;
   char    *s_dvb_svcname;
   char    *s_dvb_provider;
@@ -444,6 +445,7 @@ struct mpegts_service
   uint16_t s_dvb_prefcapid;
   int      s_dvb_prefcapid_lock;
   uint16_t s_dvb_forcecaid;
+  time_t   s_dvb_last_seen;
 
   /*
    * EIT/EPG control
@@ -738,6 +740,9 @@ mpegts_service_t *mpegts_mux_find_service(mpegts_mux_t *ms, uint16_t sid);
   (struct type*)mpegts_mux_instance_create0(calloc(1, sizeof(struct type)),\
                                             &type##_class, uuid,\
                                             mi, mm);
+
+void mpegts_mux_instance_delete ( mpegts_mux_instance_t *mmi );
+
 int mpegts_mux_instance_start
   ( mpegts_mux_instance_t **mmiptr );
 

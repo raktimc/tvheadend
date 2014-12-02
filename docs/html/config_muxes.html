@@ -96,7 +96,9 @@
 				    using spaces. A raw MPEG-TS stream is
 				    expected. The string ${service_name}
 				    is substituted with the service name
-				    field contents.
+				    field contents. The \ (backslash) character means
+				    "take the next character asis" (usually
+				    space or the backslash itself.
 
 			</dl>
                 
@@ -123,5 +125,12 @@
                 <dt>Streaming Priority
                 <dd>IPTV : The mux priority value for streamed channels through HTTP or HTSP (higher value = higher priority to use services from this mux). Value 0 means use the standard streaming network priority value.
 
+                <dt>Environment (pipe)
+                <dd>IPTV : List of environment variables for pipe (like PATH=/bin:/sbin)
+                    separated by spaces. The backslash character is handled like
+                    in URL.
+                    
+                <dt>Respawn (pipe)
+                <dd>IPTV : Respawn the executed process when it dies.
  	</dl>
 </div>

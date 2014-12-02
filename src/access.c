@@ -149,11 +149,20 @@ access_t *
 access_ticket_verify2(const char *id, const char *resource)
 {
   access_ticket_t *at;
+  char buf[256], *r;
 
   if((at = access_ticket_find(id)) == NULL)
     return NULL;
 
-  if(strcmp(at->at_resource, resource))
+  if (tvheadend_webroot) {
+    strcpy(buf, tvheadend_webroot);
+    strcat(buf, at->at_resource);
+    r = buf;
+  } else {
+    r = at->at_resource;
+  }
+
+  if(strcmp(r, resource))
     return NULL;
 
   return access_copy(at->at_access);
@@ -331,7 +340,9 @@ access_verify(const char *username, const char *password,
       bits = 0;
   }
 
-  return (mask & bits) == mask ? 0 : -1;
+  return (mask & ACCESS_OR) ?
+         ((mask & bits) ? 0 : -1) :
+         ((mask & bits) == mask ? 0 : -1);
 }
 
 /*
@@ -346,7 +357,7 @@ access_dump_a(access_t *a)
   int first;
 
   snprintf(buf, sizeof(buf),
-    "%s:%s [%s%s%s%s%s], conn=%u, chmin=%u, chmax=%u%s",
+    "%s:%s [%s%s%s%s%s], conn=%u, chmin=%llu, chmax=%llu%s",
     a->aa_representative ?: "<no-id>",
     a->aa_username ?: "<no-user>",
     a->aa_rights & ACCESS_STREAMING          ? "S" : "",
@@ -355,7 +366,7 @@ access_dump_a(access_t *a)
     a->aa_rights & ACCESS_RECORDER           ? "R" : "",
     a->aa_rights & ACCESS_ADMIN              ? "*" : "",
     a->aa_conn_limit,
-    a->aa_chmin, a->aa_chmax,
+    (long long)a->aa_chmin, (long long)a->aa_chmax,
     a->aa_match ? ", matched" : "");
 
   if (a->aa_profiles) {
@@ -793,6 +804,8 @@ access_entry_update_rights(access_entry_t *ae)
     r |= ACCESS_STREAMING;
   if (ae->ae_adv_streaming)
     r |= ACCESS_ADVANCED_STREAMING;
+  if (ae->ae_htsp_streaming)
+    r |= ACCESS_HTSP_STREAMING;
   if (ae->ae_dvr)
     r |= ACCESS_RECORDER;
   if (ae->ae_webui)
@@ -829,6 +842,7 @@ access_entry_create(const char *uuid, htsmsg_t *conf)
   TAILQ_INIT(&ae->ae_ipmasks);
 
   if (conf) {
+    ae->ae_htsp_streaming = 1;
     idnode_load(&ae->ae_id, conf);
     /* note password has PO_NOSAVE, thus it must be set manually */
     if ((s = htsmsg_get_str(conf, "password")) != NULL)
@@ -899,7 +913,7 @@ access_destroy_by_profile(profile_t *pro, int delconf)
 
   while ((ae = LIST_FIRST(&pro->pro_accesses)) != NULL) {
     LIST_REMOVE(ae, ae_profile_link);
-    ae->ae_dvr_config = NULL;
+    ae->ae_profile = NULL;
     if (delconf)
       access_entry_save(ae);
   }
@@ -915,7 +929,7 @@ access_destroy_by_dvr_config(dvr_config_t *cfg, int delconf)
 
   while ((ae = LIST_FIRST(&cfg->dvr_accesses)) != NULL) {
     LIST_REMOVE(ae, ae_dvr_config_link);
-    ae->ae_profile = profile_find_by_name(NULL, NULL);
+    ae->ae_dvr_config = NULL;
     if (delconf)
       access_entry_save(ae);
   }
@@ -1253,6 +1267,12 @@ const idclass_t access_entry_class = {
       .off      = offsetof(access_entry_t, ae_adv_streaming),
     },
     {
+      .type     = PT_BOOL,
+      .id       = "htsp_streaming",
+      .name     = "HTSP Streaming",
+      .off      = offsetof(access_entry_t, ae_htsp_streaming),
+    },
+    {
       .type     = PT_STR,
       .id       = "profile",
       .name     = "Streaming Profile",
@@ -1293,13 +1313,15 @@ const idclass_t access_entry_class = {
       .off      = offsetof(access_entry_t, ae_conn_limit),
     },
     {
-      .type     = PT_U32,
+      .type     = PT_S64,
+      .intsplit = CHANNEL_SPLIT,
       .id       = "channel_min",
       .name     = "Min Channel Num",
       .off      = offsetof(access_entry_t, ae_chmin),
     },
     {
-      .type     = PT_U32,
+      .type     = PT_S64,
+      .intsplit = CHANNEL_SPLIT,
       .id       = "channel_max",
       .name     = "Max Channel Num",
       .off      = offsetof(access_entry_t, ae_chmax),
@@ -1366,12 +1388,13 @@ access_init(int createdefault, int noacl)
     free(ae->ae_comment);
     ae->ae_comment = strdup("Default access entry");
 
-    ae->ae_enabled       = 1;
-    ae->ae_streaming     = 1;
-    ae->ae_adv_streaming = 1;
-    ae->ae_dvr           = 1;
-    ae->ae_webui         = 1;
-    ae->ae_admin         = 1;
+    ae->ae_enabled        = 1;
+    ae->ae_streaming      = 1;
+    ae->ae_adv_streaming  = 1;
+    ae->ae_htsp_streaming = 1;
+    ae->ae_dvr            = 1;
+    ae->ae_webui          = 1;
+    ae->ae_admin          = 1;
     access_entry_update_rights(ae);
 
     TAILQ_INIT(&ae->ae_ipmasks);

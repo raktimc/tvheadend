@@ -193,9 +193,12 @@ htsmsg_t *
 channel_class_get_list(void *o)
 {
   htsmsg_t *m = htsmsg_create_map();
+  htsmsg_t *p = htsmsg_create_map();
   htsmsg_add_str(m, "type",  "api");
   htsmsg_add_str(m, "uri",   "channel/list");
   htsmsg_add_str(m, "event", "channel");
+  htsmsg_add_u32(p, "all",  1);
+  htsmsg_add_msg(m, "params", p);
   return m;
 }
 
@@ -245,9 +248,11 @@ channel_class_epggrab_set ( void *o, const void *v )
   }
     
   /* Link */
-  HTSMSG_FOREACH(f, l) {
-    if ((ec = epggrab_channel_find_by_id(htsmsg_field_get_str(f))))
-      save |= epggrab_channel_link(ec, ch);
+  if (ch->ch_epgauto && l) {
+    HTSMSG_FOREACH(f, l) {
+      if ((ec = epggrab_channel_find_by_id(htsmsg_field_get_str(f))))
+        save |= epggrab_channel_link(ec, ch);
+    }
   }
 
   /* Delete */
@@ -272,6 +277,14 @@ channel_class_epggrab_list ( void *o )
   htsmsg_add_bool(e, "enum", 1);
   htsmsg_add_msg(m, "params", e);
   return m;
+}
+
+static void
+channel_class_epgauto_notify ( void *obj )
+{
+  channel_t *ch = obj;
+  if (!ch->ch_epgauto)
+    channel_class_epggrab_set(obj, NULL);
 }
 
 static const void *
@@ -309,14 +322,12 @@ const idclass_t channel_class = {
   .ic_get_title  = channel_class_get_title,
   .ic_delete     = channel_class_delete,
   .ic_properties = (const property_t[]){
-#if 0
     {
       .type     = PT_BOOL,
       .id       = "enabled",
       .name     = "Enabled",
       .off      = offsetof(channel_t, ch_enabled),
     },
-#endif
     {
       .type     = PT_STR,
       .id       = "name",
@@ -346,6 +357,13 @@ const idclass_t channel_class = {
       .name     = "Icon URL",
       .get      = channel_class_get_icon,
       .opts     = PO_RDONLY | PO_NOSAVE | PO_HIDDEN,
+    },
+    {
+      .type     = PT_BOOL,
+      .id       = "epgauto",
+      .name     = "Auto EPG Channel",
+      .off      = offsetof(channel_t, ch_epgauto),
+      .notify   = channel_class_epgauto_notify,
     },
     {
       .type     = PT_STR,
@@ -417,7 +435,7 @@ channel_find_by_name ( const char *name )
   if (name == NULL)
     return NULL;
   CHANNEL_FOREACH(ch)
-    if (!strcmp(channel_get_name(ch), name))
+    if (ch->ch_enabled && !strcmp(channel_get_name(ch), name))
       break;
   return ch;
 }
@@ -457,17 +475,23 @@ channel_find_by_number ( const char *no )
  * Check if user can access the channel
  */
 int
-channel_access(channel_t *ch, access_t *a, const char *username)
+channel_access(channel_t *ch, access_t *a, int disabled)
 {
+  if (!ch)
+    return 0;
+
+  if (!disabled && !ch->ch_enabled)
+    return 0;
+
   /* Channel number check */
-  if (ch && (a->aa_chmin || a->aa_chmax)) {
-    int chnum = channel_get_number(ch);
+  if (a->aa_chmin || a->aa_chmax) {
+    int64_t chnum = channel_get_number(ch);
     if (chnum < a->aa_chmin || chnum > a->aa_chmax)
       return 0;
   }
 
   /* Channel tag check */
-  if (ch && a->aa_chtags) {
+  if (a->aa_chtags) {
     channel_tag_mapping_t *ctm;
     htsmsg_field_t *f;
     HTSMSG_FOREACH(f, a->aa_chtags) {
@@ -662,7 +686,7 @@ channel_get_icon ( channel_t *ch )
           continue;
         snprintf(buf2, sizeof(buf2), "%s/%s", picon, icn+8);
         if (i > 1 || check_file(buf2)) {
-          ch->ch_icon = strdup(icn);
+          icon = ch->ch_icon = strdup(icn);
           channel_save(ch);
           idnode_notify_simple(&ch->ch_id);
           break;
@@ -721,6 +745,10 @@ channel_create0
     tvherror("channel", "id collision!");
     abort();
   }
+
+  /* Defaults */
+  ch->ch_enabled = 1;
+  ch->ch_epgauto = 1;
 
   if (conf) {
     ch->ch_load = 1;
@@ -1041,6 +1069,35 @@ channel_tag_get_icon(channel_tag_t *ct)
   return icon;
 }
 
+/**
+ * Check if user can access the channel tag
+ */
+int
+channel_tag_access(channel_tag_t *ct, access_t *a, int disabled)
+{
+  if (!ct)
+    return 0;
+
+  if (!disabled && (!ct->ct_enabled || ct->ct_internal))
+    return 0;
+
+  if (!ct->ct_private)
+    return 1;
+
+  /* Channel tag check */
+  if (a->aa_chtags) {
+    htsmsg_field_t *f;
+    const char *uuid = idnode_uuid_as_str(&ct->ct_id);
+    HTSMSG_FOREACH(f, a->aa_chtags)
+      if (!strcmp(htsmsg_field_get_str(f) ?: "", uuid))
+        goto chtags_ok;
+    return 0;
+  }
+chtags_ok:
+
+  return 1;
+}
+
 /* **************************************************************************
  * Channel Tag Class definition
  * **************************************************************************/
@@ -1083,9 +1140,12 @@ htsmsg_t *
 channel_tag_class_get_list(void *o)
 {
   htsmsg_t *m = htsmsg_create_map();
+  htsmsg_t *p = htsmsg_create_map();
   htsmsg_add_str(m, "type",  "api");
   htsmsg_add_str(m, "uri",   "channeltag/list");
   htsmsg_add_str(m, "event", "channeltag");
+  htsmsg_add_u32(p, "all",  1);
+  htsmsg_add_msg(m, "params", p);
   return m;
 }
 
@@ -1114,6 +1174,12 @@ const idclass_t channel_tag_class = {
       .id       = "internal",
       .name     = "Internal",
       .off      = offsetof(channel_tag_t, ct_internal),
+    },
+    {
+      .type     = PT_BOOL,
+      .id       = "private",
+      .name     = "Private",
+      .off      = offsetof(channel_tag_t, ct_private),
     },
     {
       .type     = PT_STR,

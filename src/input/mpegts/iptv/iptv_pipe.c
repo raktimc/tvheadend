@@ -25,66 +25,55 @@
 #include <sys/types.h>
 #include <sys/ioctl.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <assert.h>
 
 /*
  * Connect UDP/RTP
  */
 static int
-iptv_pipe_start ( iptv_mux_t *im, const char *_raw, const url_t *url )
+iptv_pipe_start ( iptv_mux_t *im, const char *raw, const url_t *url )
 {
-  char *argv[32], *f, *raw, *s, *p, *a;
-  int i = 1, rd;
+  char **argv = NULL, **envp = NULL;
+  const char *replace[] = { "${service_name}", im->mm_iptv_svcname ?: "", NULL };
+  int rd;
+  pid_t pid;
 
-  if (strncmp(_raw, "pipe://", 7))
-    return -1;
+  if (strncmp(raw, "pipe://", 7))
+    goto err;
 
-  s = raw = tvh_strdupa(_raw + 7);
+  if (spawn_parse_args(&argv, 64, raw + 7, replace))
+    goto err;
 
-  argv[0] = NULL;
+  if (spawn_parse_args(&envp, 64, im->mm_iptv_env ?: "", NULL))
+    goto err;
 
-  while (*s && *s != ' ')
-    s++;
-  if (*s == ' ') {
-    *(char *)s = '\0';
-    s++;
-  }
-
-  while (*s && i < ARRAY_SIZE(argv) - 1) {
-    f = s;
-    while (*s && *s != ' ')
-      s++;
-    if (f != s) {
-      if (*s) {
-        *(char *)s = '\0';
-        s++;
-      }
-      p = strstr(f, "${service_name}");
-      if (p) {
-        a = alloca(strlen(f) + strlen(im->mm_iptv_svcname ?: ""));
-        *p = '\0';
-        strcpy(a, f);
-        strcat(a, im->mm_iptv_svcname ?: "");
-        strcat(a, p + 15);
-        f = a;
-      }
-      argv[i++] = f;
-    }
-  }
-  argv[i] = NULL;
-
-  if (spawn_and_give_stdout(raw, argv, &rd, 1)) {
+  if (spawn_and_give_stdout(argv[0], argv, envp, &rd, &pid, 1)) {
     tvherror("iptv", "Unable to start pipe '%s' (wrong executable?)", raw);
-    return -1;
+    goto err;
   }
+
+  spawn_free_args(argv);
+  spawn_free_args(envp);
 
   fcntl(rd, F_SETFD, fcntl(rd, F_GETFD) | FD_CLOEXEC);
   fcntl(rd, F_SETFL, fcntl(rd, F_GETFL) | O_NONBLOCK);
 
   im->mm_iptv_fd = rd;
+  im->im_data = (void *)(intptr_t)pid;
 
-  iptv_input_mux_started(im);
+  im->mm_iptv_respawn_last = dispatch_clock;
+
+  if (url)
+    iptv_input_mux_started(im);
   return 0;
+
+err:
+  if (argv)
+    spawn_free_args(argv);
+  if (envp)
+    spawn_free_args(envp);
+  return -1;
 }
 
 static void
@@ -92,6 +81,8 @@ iptv_pipe_stop
   ( iptv_mux_t *im )
 {
   int rd = im->mm_iptv_fd;
+  pid_t pid = (intptr_t)im->im_data;
+  spawn_kill(pid, SIGKILL);
   if (rd > 0)
     close(rd);
   im->mm_iptv_fd = -1;
@@ -103,17 +94,42 @@ iptv_pipe_read ( iptv_mux_t *im )
   int r, rd = im->mm_iptv_fd;
   ssize_t res = 0;
   char buf[64*1024];
+  pid_t pid;
 
-  while (rd > 0 && res < 1024*1024) {
+  while (rd > 0 && res < sizeof(buf)) {
     r = read(rd, buf, sizeof(buf));
     if (r < 0) {
+      if (errno == EAGAIN)
+        break;
       if (ERRNO_AGAIN(errno))
         continue;
-      break;
     }
-    if (!r) {
+    if (r <= 0) {
       close(rd);
+      pid = (intptr_t)im->im_data;
+      spawn_kill(pid, SIGKILL);
       im->mm_iptv_fd = -1;
+      im->im_data = NULL;
+      if (dispatch_clock < im->mm_iptv_respawn_last + 2) {
+        tvherror("iptv", "stdin pipe unexpectedly closed: %s",
+                 r < 0 ? strerror(errno) : "No data");
+      } else {
+        /* avoid deadlock here */
+        pthread_mutex_unlock(&iptv_lock);
+        pthread_mutex_lock(&global_lock);
+        pthread_mutex_lock(&iptv_lock);
+        if (im->mm_active) {
+          if (iptv_pipe_start(im, im->mm_iptv_url, NULL)) {
+            tvherror("iptv", "unable to respawn %s", im->mm_iptv_url);
+          } else {
+            iptv_input_fd_started(im);
+            im->mm_iptv_respawn_last = dispatch_clock;
+          }
+        }
+        pthread_mutex_unlock(&iptv_lock);
+        pthread_mutex_unlock(&global_lock);
+        pthread_mutex_lock(&iptv_lock);
+      }
       break;
     }
     sbuf_append(&im->mm_iptv_buffer, buf, r);

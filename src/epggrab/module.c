@@ -248,6 +248,7 @@ epggrab_module_int_done( void *m )
 {
   epggrab_module_int_t *mod = m;
   free((char *)mod->path);
+  mod->path = NULL;
 }
 
 epggrab_module_int_t *epggrab_module_int_create
@@ -282,12 +283,19 @@ char *epggrab_module_grab_spawn ( void *m )
   int        rd = -1, outlen;
   char       *outbuf;
   epggrab_module_int_t *mod = m;
+  char **argv = NULL;
 
   /* Debug */
   tvhlog(LOG_INFO, mod->id, "grab %s", mod->path);
 
+  /* Arguments */
+  if (spawn_parse_args(&argv, 64, mod->path, NULL)) {
+    tvhlog(LOG_ERR, mod->id, "unable to parse arguments");
+    return NULL;
+  }
+
   /* Grab */
-  outlen = spawn_and_give_stdout(mod->path, NULL, &rd, 1);
+  outlen = spawn_and_give_stdout(argv[0], (char **)argv, NULL, &rd, NULL, 1);
 
   if (outlen < 0)
     goto error;
@@ -301,6 +309,7 @@ char *epggrab_module_grab_spawn ( void *m )
   return outbuf;
 
 error:
+  spawn_free_args(argv);
   if (rd >= 0)
     close(rd);
   tvhlog(LOG_ERR, mod->id, "no output detected");
@@ -392,7 +401,7 @@ epggrab_module_done_socket( void *m )
   shutdown(sock, SHUT_RDWR);
   close(sock);
   if (mod->tid) {
-    pthread_kill(mod->tid, SIGTERM);
+    pthread_kill(mod->tid, SIGQUIT);
     pthread_join(mod->tid, NULL);
   }
   mod->tid = 0;

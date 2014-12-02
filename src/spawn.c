@@ -60,6 +60,8 @@ typedef struct spawn {
   const char *name;
 } spawn_t;
 
+static void spawn_reaper(void);
+
 /*
  *
  */
@@ -274,12 +276,37 @@ spawn_reap(char *stxt, size_t stxtlen)
 /**
  * The reaper is called once a second to finish of any pending spawns
  */
-void
+static void
 spawn_reaper(void)
 {
   while (spawn_reap(NULL, 0) != -EAGAIN) ;
 }
 
+/**
+ * Kill the pid (only if waiting)
+ */
+int
+spawn_kill(pid_t pid, int sig)
+{
+  int r = -ESRCH;
+  spawn_t *s;
+
+  if (pid > 0) {
+    spawn_reaper();
+
+    pthread_mutex_lock(&spawn_mutex);
+    LIST_FOREACH(s, &spawns, link)
+      if(s->pid == pid)
+        break;
+    if (s) {
+      r = kill(pid, sig);
+      if (r < 0)
+        r = -errno;
+    }
+    pthread_mutex_unlock(&spawn_mutex);
+  }
+  return r;
+}
 
 /**
  * Enqueue a spawn on the pending spawn list
@@ -296,17 +323,85 @@ spawn_enq(const char *name, int pid)
   return s;
 }
 
+
+/**
+ *
+ */
+int
+spawn_parse_args(char ***argv, int argc, const char *cmd, const char **replace)
+{
+  char *s, *f, *p, *a;
+  const char **r;
+  int i = 0, l;
+
+  if (!argv || !cmd)
+    return -1;
+
+  s = tvh_strdupa(cmd);
+  *argv = calloc(argc, sizeof(char *));
+
+  while (*s && i < argc - 1) {
+    f = s;
+    while (*s && *s != ' ') {
+      while (*s && *s != ' ' && *s != '\\')
+        s++;
+      if (*s == '\\') {
+        memmove(s, s + 1, strlen(s));
+        if (*s)
+          s++;
+      }
+    }
+    if (f != s) {
+      if (*s) {
+        *(char *)s = '\0';
+        s++;
+      }
+      for (r = replace; r && *r; r += 2) {
+        p = strstr(f, *r);
+        if (p) {
+          l = strlen(*r);
+          a = malloc(strlen(f) + strlen(r[1]) + 1);
+          *p = '\0';
+          strcpy(a, f);
+          strcat(a, r[1]);
+          strcat(a, p + l);
+          *argv[i++] = f;
+          break;
+        }
+      }
+      if (r && *r)
+        continue;
+      (*argv)[i++] = strdup(f);
+    }
+  }
+  (*argv)[i] = NULL;
+  return 0;
+}
+
+/**
+ *
+ */
+void
+spawn_free_args(char **argv)
+{
+  char **a = argv;
+  for (; *a; a++)
+    free(*a);
+  free(argv);
+}
+
 /**
  * Execute the given program and return its standard output as file-descriptor (pipe).
  */
-
 int
-spawn_and_give_stdout(const char *prog, char *argv[], int *rd, int redir_stderr)
+spawn_and_give_stdout(const char *prog, char *argv[], char *envp[],
+                      int *rd, pid_t *pid, int redir_stderr)
 {
   pid_t p;
-  int fd[2], f;
+  int fd[2], f, i, maxfd;
   char bin[256];
   const char *local_argv[2] = { NULL, NULL };
+  char **e, **e0, **e2, **e3, *p1, *p2;
 
   if (*prog != '/' && *prog != '.') {
     if (!find_exec(prog, bin, sizeof(bin))) return -1;
@@ -315,6 +410,34 @@ spawn_and_give_stdout(const char *prog, char *argv[], int *rd, int redir_stderr)
 
   if (!argv) argv = (void *)local_argv;
   if (!argv[0]) argv[0] = (char*)prog;
+
+  if (!envp || !envp[0]) {
+    e = environ;
+  } else {
+    for (i = 0, e2 = environ; *e2; i++, e2++);
+    for (f = 0, e2 = envp; *e2; f++, e2++);
+    e = alloca((i + f + 1) * sizeof(char *));
+    memcpy(e, environ, i * sizeof(char *));
+    e0 = e + i;
+    *e0 = NULL;
+    for (e2 = envp; *e2; e2++) {
+      for (e3 = e; *e3; e3++) {
+        p1 = strchr(*e2, '=');
+        p2 = strchr(*e3, '=');
+        if (p1 - *e2 == p2 - *e3 && !strncmp(*e2, *e3, p1 - *e2)) {
+          *e3 = *e2;
+          break;
+        }
+      }
+      if (!*e3) {
+        *e0++ = *e2;
+        *e0 = NULL;
+      }
+    }
+    *e0 = NULL;
+  }
+
+  maxfd = sysconf(_SC_OPEN_MAX);
 
   pthread_mutex_lock(&fork_lock);
 
@@ -333,12 +456,6 @@ spawn_and_give_stdout(const char *prog, char *argv[], int *rd, int redir_stderr)
   }
 
   if(p == 0) {
-    close(0);
-    close(2);
-    close(fd[0]);
-    dup2(fd[1], 1);
-    close(fd[1]);
-
     f = open("/dev/null", O_RDWR);
     if(f == -1) {
       spawn_error("pid %d cannot open /dev/null for redirect %s -- %s",
@@ -346,13 +463,24 @@ spawn_and_give_stdout(const char *prog, char *argv[], int *rd, int redir_stderr)
       exit(1);
     }
 
+    close(0);
+    close(1);
+    close(2);
+
     dup2(f, 0);
+    dup2(fd[1], 1);
     dup2(redir_stderr ? spawn_pipe_error.wr : f, 2);
+
+    close(fd[0]);
+    close(fd[1]);
     close(f);
 
     spawn_info("Executing \"%s\"\n", prog);
 
-    execve(prog, argv, environ);
+    for (f = 3; f < maxfd; f++)
+      close(f);
+
+    execve(prog, argv, e);
     spawn_error("pid %d cannot execute %s -- %s\n",
                 getpid(), prog, strerror(errno));
     exit(1);
@@ -365,6 +493,8 @@ spawn_and_give_stdout(const char *prog, char *argv[], int *rd, int redir_stderr)
   close(fd[1]);
 
   *rd = fd[0];
+  if (pid)
+    *pid = p;
   return 0;
 }
 
@@ -375,9 +505,9 @@ spawn_and_give_stdout(const char *prog, char *argv[], int *rd, int redir_stderr)
  * The function will return the size of the buffer
  */
 int
-spawnv(const char *prog, char *argv[])
+spawnv(const char *prog, char *argv[], pid_t *pid, int redir_stdout, int redir_stderr)
 {
-  pid_t p;
+  pid_t p, f, maxfd;
   char bin[256];
   const char *local_argv[2] = { NULL, NULL };
 
@@ -388,6 +518,8 @@ spawnv(const char *prog, char *argv[])
 
   if(!argv) argv = (void *)local_argv;
   if (!argv[0]) argv[0] = (char*)prog;
+
+  maxfd = sysconf(_SC_OPEN_MAX);
 
   pthread_mutex_lock(&fork_lock);
 
@@ -401,9 +533,28 @@ spawnv(const char *prog, char *argv[])
   }
 
   if(p == 0) {
+    f = open("/dev/null", O_RDWR);
+    if(f == -1) {
+      spawn_error("pid %d cannot open /dev/null for redirect %s -- %s",
+                  getpid(), prog, strerror(errno));
+      exit(1);
+    }
+
     close(0);
+    close(1);
     close(2);
+
+    dup2(f, 0);
+    dup2(redir_stdout ? spawn_pipe_info.wr : f, 1);
+    dup2(redir_stderr ? spawn_pipe_error.wr : f, 2);
+
+    close(f);
+
     spawn_info("Executing \"%s\"\n", prog);
+
+    for (f = 3; f < maxfd; f++)
+      close(f);
+
     execve(prog, argv, environ);
     spawn_error("pid %d cannot execute %s -- %s\n",
 	        getpid(), prog, strerror(errno));
@@ -414,6 +565,9 @@ spawnv(const char *prog, char *argv[])
   pthread_mutex_unlock(&fork_lock);
 
   spawn_enq(prog, p);
+
+  if (pid)
+    *pid = p;
 
   return 0;
 }

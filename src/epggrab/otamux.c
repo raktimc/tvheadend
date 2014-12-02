@@ -195,11 +195,16 @@ epggrab_ota_done ( epggrab_ota_mux_t *om, int reason )
     if (!om->om_done && om->om_requeue) {
       TAILQ_INSERT_HEAD(&epggrab_ota_pending, om, om_q_link);
       om->om_q_type = EPGGRAB_OTA_MUX_PENDING;
+    } else {
+      om->om_requeue = 0;
     }
   } else if (reason == EPGGRAB_OTA_DONE_TIMEOUT) {
+    om->om_requeue = 0;
     LIST_FOREACH(map, &om->om_modules, om_link)
       if (!map->om_complete)
         tvhlog(LOG_WARNING, "epggrab", "%s - data completion timeout for %s", map->om_module->name, name);
+  } else {
+    om->om_requeue = 0;
   }
 
   /* Remove subscriber */
@@ -295,6 +300,7 @@ epggrab_mux_stop ( mpegts_mux_t *mm, void *p )
   epggrab_ota_mux_t *ota;
   const char *uuid = idnode_uuid_as_str(&mm->mm_id);
 
+  tvhtrace("epggrab", "mux %p (%s) stop", mm, uuid);
   TAILQ_FOREACH(ota, &epggrab_ota_active, om_q_link)
     if (!strcmp(ota->om_mux_uuid, uuid)) {
       epggrab_ota_done(ota, EPGGRAB_OTA_DONE_STOLEN);
@@ -429,6 +435,8 @@ epggrab_ota_data_timeout_cb ( void *p )
     epggrab_ota_done(om, EPGGRAB_OTA_DONE_NO_DATA);
     /* Not completed, but no data - wait for a manual mux tuning */
     epggrab_ota_complete_mark(om, 1);
+  } else {
+    tvhtrace("epggrab", "data timeout check succeed");
   }
 }
 
@@ -541,6 +549,7 @@ next_one:
     if (first == NULL)
       first = om;
   } else {
+    tvhtrace("epggrab", "mux %p started", mm);
     kick = 0;
     /* note: it is possible that the mux_start listener is not called */
     /* for reshared mux subscriptions, so call it (maybe second time) here.. */
@@ -737,7 +746,7 @@ epggrab_ota_load_one
     free(ota);
     return;
   }
-  htsmsg_get_u32(c, "complete", (uint32_t *)&ota->om_complete);
+  ota->om_complete = htsmsg_get_u32_or_default(c, "complete", 0) != 0;
   
   if (!(l = htsmsg_get_list(c, "modules"))) return;
   HTSMSG_FOREACH(f, l) {

@@ -683,7 +683,7 @@ static void _xmltv_load_grabbers ( void )
   char *tmp, *tmp2 = NULL, *path;
 
   /* Load data */
-  if (spawn_and_give_stdout(XMLTV_FIND, NULL, &rd, 1) >= 0)
+  if (spawn_and_give_stdout(XMLTV_FIND, NULL, NULL, &rd, NULL, 1) >= 0)
     outlen = file_readall(rd, &outbuf);
   if (rd >= 0)
     close(rd);
@@ -696,8 +696,13 @@ static void _xmltv_load_grabbers ( void )
         outbuf[i] = '\0';
         sprintf(name, "XMLTV: %s", &outbuf[n]);
         epggrab_module_int_create(NULL, &outbuf[p], name, 3, &outbuf[p],
-                                NULL, _xmltv_parse, NULL, NULL);
+                                  NULL, _xmltv_parse, NULL, NULL);
         p = n = i + 1;
+      } else if ( outbuf[i] == '\\') {
+        memmove(outbuf, outbuf + 1, strlen(outbuf));
+        if (outbuf[i])
+          i++;
+        continue;
       } else if ( outbuf[i] == '|' ) {
         outbuf[i] = '\0';
         n = i + 1;
@@ -710,10 +715,9 @@ static void _xmltv_load_grabbers ( void )
   } else if ((tmp = getenv("PATH"))) {
     tvhdebug("epggrab", "using internal grab search");
     char bin[256];
-    char desc[] = "--description";
     char *argv[] = {
       NULL,
-      desc,
+      (char *)"--description",
       NULL
     };
     path = strdup(tmp);
@@ -731,7 +735,7 @@ static void _xmltv_load_grabbers ( void )
           if (!(st.st_mode & S_IEXEC)) continue;
           if (!S_ISREG(st.st_mode)) continue;
           rd = -1;
-          if (spawn_and_give_stdout(bin, argv, &rd, 1) >= 0 &&
+          if (spawn_and_give_stdout(bin, argv, NULL, &rd, NULL, 1) >= 0 &&
               (outlen = file_readall(rd, &outbuf)) > 0) {
             close(rd);
             if (outbuf[outlen-1] == '\n') outbuf[outlen-1] = '\0';
