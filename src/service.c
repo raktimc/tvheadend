@@ -54,6 +54,15 @@ static void service_class_save(struct idnode *self);
 
 struct service_queue service_all;
 
+static void
+service_class_notify_enabled ( void *obj )
+{
+  service_t *t = (service_t *)obj;
+  if (t->s_enabled && t->s_auto != SERVICE_AUTO_OFF)
+    t->s_auto = SERVICE_AUTO_NORMAL;
+  bouquet_notify_service_enabled(t);
+}
+
 static const void *
 service_class_channel_get ( void *obj )
 {
@@ -168,6 +177,17 @@ service_class_caid_get ( void *obj )
   return &s;
 }
 
+static htsmsg_t *
+service_class_auto_list ( void *o )
+{
+  static const struct strtab tab[] = {
+    { "",                   0 },
+    { "No Auto (Disabled)", 1 },
+    { "Missing In PAT",     2 }
+  };
+  return strtab2htsmsg(tab);
+}
+
 const idclass_t service_class = {
   .ic_class      = "service",
   .ic_caption    = "Service",
@@ -182,6 +202,14 @@ const idclass_t service_class = {
       .id       = "enabled",
       .name     = "Enabled",
       .off      = offsetof(service_t, s_enabled),
+      .notify   = service_class_notify_enabled,
+    },
+    {
+      .type     = PT_INT,
+      .id       = "auto",
+      .name     = "Automatic Checking",
+      .list     = service_class_auto_list,
+      .off      = offsetof(service_t, s_auto),
     },
     {
       .type     = PT_STR,
@@ -811,6 +839,18 @@ service_destroy(service_t *t, int delconf)
   TAILQ_REMOVE(&service_all, t, s_all_link);
 
   service_unref(t);
+}
+
+void
+service_set_enabled(service_t *t, int enabled, int _auto)
+{
+  if (t->s_enabled != !!enabled) {
+    t->s_enabled = !!enabled;
+    t->s_auto = _auto;
+    service_class_notify_enabled(t);
+    service_request_save(t, 0);
+    idnode_notify_simple(&t->s_id);
+  }
 }
 
 static int64_t
@@ -1556,7 +1596,7 @@ service_get_channel_name ( service_t *s )
 const char *
 service_get_full_channel_name ( service_t *s )
 {
-  static char __thread buf[256];
+  static char buf[256];
   const char *r = NULL;
   int         len;
 
@@ -1573,7 +1613,7 @@ service_get_full_channel_name ( service_t *s )
     buf[len++] = '/';
   buf[len] = '\0';
   if (len < sizeof(buf))
-    snprintf(buf + len, sizeof(buf) - len, "%s", r);
+    snprintf(buf + len, sizeof(buf) - len, "%s%s", !s->s_enabled ? "---" : "", r);
   return buf;
 }
 

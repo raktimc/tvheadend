@@ -194,6 +194,13 @@ typedef struct service_lcn {
 /**
  *
  */
+#define SERVICE_AUTO_NORMAL       0
+#define SERVICE_AUTO_OFF          1
+#define SERVICE_AUTO_PAT_MISSING  2
+
+/**
+ *
+ */
 typedef struct service {
   idnode_t s_id;
 
@@ -280,6 +287,7 @@ typedef struct service {
    * subscription scheduling.
    */
   int s_enabled;
+  int s_auto;
 
   LIST_ENTRY(service) s_active_link;
 
@@ -520,6 +528,8 @@ int service_is_other(service_t *t);
 #define service_is_tv(s) (service_is_hdtv(s) || service_is_sdtv(s))
 
 int service_is_encrypted ( service_t *t );
+
+void service_set_enabled ( service_t *t, int enabled, int _auto );
 
 void service_destroy(service_t *t, int delconf);
 
