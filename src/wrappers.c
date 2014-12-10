@@ -72,9 +72,15 @@ int
 tvh_write(int fd, const void *buf, size_t len)
 {
   ssize_t c;
+  ssize_t towrite;
+  int txsize = 188*7;// under MTU size
+  if (getsockopt(fd, SOL_SOCKET, SO_SNDBUF, &txsize, sizeof(txsize)) == -1) {
+    txsize = 188*7;
+  }
 
   while (len) {
-    c = write(fd, buf, len);
+    towrite = (len > txsize)? txsize: len;
+    c = write(fd, buf, towrite);
     if (c < 0) {
       if (ERRNO_AGAIN(errno)) {
         usleep(100);

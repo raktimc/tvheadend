@@ -838,7 +838,7 @@ udp_mcast_service(http_connection_t *hc, service_t *service, int weight)
   hc->hc_username = malloc(unlen);
   snprintf(hc->hc_username, unlen, "%s:%s", address, str);
 
-  if (!(uc = udp_connect ("multicast", address, address, port, NULL, 32000))) {
+  if (!(uc = udp_connect ("multicast", address, address, port, NULL, 188*7))) {
     tvhlog(LOG_ERR, "multicast", "Could not create a connected udp socket");
     return res;
   }
