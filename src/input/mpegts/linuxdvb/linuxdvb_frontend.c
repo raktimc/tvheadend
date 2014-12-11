@@ -285,13 +285,10 @@ linuxdvb_frontend_stop_mux
   tvhdebug("linuxdvb", "%s - stopping %s", buf1, buf2);
 
   /* Stop thread */
-  if (lfe->lfe_dvr_pipe.wr > 0) {
-    tvh_write(lfe->lfe_dvr_pipe.wr, "", 1);
+  if (lfe->lfe_running != 0) {
+    lfe->lfe_running = 0;
     tvhtrace("linuxdvb", "%s - waiting for dvr thread", buf1);
-    pthread_mutex_unlock(&global_lock);
     pthread_join(lfe->lfe_dvr_thread, NULL);
-    pthread_mutex_lock(&global_lock);
-    tvh_pipe_close(&lfe->lfe_dvr_pipe);
     tvhdebug("linuxdvb", "%s - stopped dvr thread", buf1);
   }
 
@@ -544,7 +541,7 @@ linuxdvb_frontend_monitor ( void *aux )
       lfe->lfe_locked = 1;
   
       /* Start input */
-      tvh_pipe(O_NONBLOCK, &lfe->lfe_dvr_pipe);
+      lfe->lfe_running = 1;
       pthread_mutex_lock(&lfe->lfe_dvr_lock);
       tvhthread_create(&lfe->lfe_dvr_thread, NULL,
                        linuxdvb_frontend_input_thread, lfe);
@@ -817,7 +814,7 @@ linuxdvb_frontend_input_thread ( void *aux )
   int dvr = -1;
   char buf[256];
   int nfds;
-  tvhpoll_event_t ev[2];
+  tvhpoll_event_t ev[1];
   tvhpoll_t *efd;
   ssize_t n;
   size_t skip = (MIN(lfe->lfe_skip_bytes, 1024*1024) / 188) * 188;
@@ -840,22 +837,19 @@ linuxdvb_frontend_input_thread ( void *aux )
   }
 
   /* Setup poll */
-  efd = tvhpoll_create(2);
+  efd = tvhpoll_create(1);
   memset(ev, 0, sizeof(ev));
   ev[0].events             = TVHPOLL_IN;
   ev[0].fd = ev[0].data.fd = dvr;
-  ev[1].events             = TVHPOLL_IN;
-  ev[1].fd = ev[1].data.fd = lfe->lfe_dvr_pipe.rd;
-  tvhpoll_add(efd, ev, 2);
+  tvhpoll_add(efd, ev, 1);
 
   /* Allocate memory */
   sbuf_init_fixed(&sb, 18800);
 
   /* Read */
-  while (tvheadend_running) {
-    nfds = tvhpoll_wait(efd, ev, 1, -1);
+  while (tvheadend_running && lfe->lfe_running) {
+    nfds = tvhpoll_wait(efd, ev, 1, 500);
     if (nfds < 1) continue;
-    if (ev[0].data.fd != dvr) break;
     
     /* Read */
     if ((n = sbuf_read(&sb, dvr)) < 0) {
@@ -884,6 +878,7 @@ linuxdvb_frontend_input_thread ( void *aux )
     mpegts_input_recv_packets((mpegts_input_t*)lfe, mmi, &sb, NULL, NULL);
   }
 
+  lfe->lfe_running = 0;
   sbuf_free(&sb);
   tvhpoll_destroy(efd);
   close(dvr);
