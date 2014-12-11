@@ -73,10 +73,11 @@ tvh_write(int fd, const void *buf, size_t len)
 {
   ssize_t c;
   ssize_t towrite;
-  int txsize = 188*7;// under MTU size
-  socklen_t txsz = sizeof(txsize);
-  if (getsockopt(fd, SOL_SOCKET, SO_SNDBUF, &txsize, &txsz) == -1) {
-    txsize = 188*7;
+  int txsize = len;
+  int sotype = SOCK_STREAM;
+  socklen_t sz = sizeof(sotype);
+  if (getsockopt(fd, SOL_SOCKET, SO_TYPE, &sotype, &sz) == -1 || sotype == SOCK_DGRAM) {
+    txsize = 188*7; // under MTU size for udp sockets
   }
 
   while (len) {
