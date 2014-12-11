@@ -45,11 +45,14 @@ def execApiRequestJ(path):
 def killall():
 	cnns = execApiRequestJ('/api/status/connections')
 	if cnns and 'entries' in cnns:
-		for e in cnns['entries']:
-			if e['type'] == 'UDP-MULTICAST':
-				execApiRequestJ('/api/connections/cancel?'+ urllib.urlencode({'id': e['id']}))
-				time.sleep(0.3)
-	time.sleep(1)
+		ents = '[' + ','.join(str(e['id']) for e in cnns['entries'] if e['type'] == 'UDP-MULTICAST') + ']'
+		if len(ents) <= 2:
+			print "No multicast connections found to stop..."
+			return
+		print "Closing %d multicasts..." % len(ents)
+		execApiRequestJ('/api/connections/cancel?'+ urllib.urlencode({'id': ents}))
+
+	time.sleep(0.5)
 	cnns = execApiRequestJ('/api/status/connections')
 	if cnns and 'entries' in cnns:
 		ids = [ e['id'] for e in cnns['entries'] if e['type'] == 'UDP-MULTICAST']
@@ -101,7 +104,7 @@ def start(sid, address, port, mux, services=None, cnns=None):
 			if enabled:
 				print 'Starting %s sid: %i ...' % (svc['text'].encode("utf-8"), sid)
 				execApiRequest(('/stream/mcast/%s?' % uuid) + urllib.urlencode({'address': address, 'port': port, 'mux': mux}))
-				time.sleep(0.3)
+				time.sleep(0.5)
 #				print json.dumps(svc, indent=4)
 			else:
 				print 'Service with sid: %i is disabled...' % sid
