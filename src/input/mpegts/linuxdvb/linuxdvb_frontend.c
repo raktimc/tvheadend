@@ -852,7 +852,7 @@ linuxdvb_frontend_input_thread ( void *aux )
     if (nfds < 1) continue;
     
     /* Read */
-    if ((n = sbuf_read(&sb, dvr)) < 0) {
+    if ((n = sbuf_tsdebug_read(mmi->mmi_mux, &sb, dvr)) < 0) {
       if (ERRNO_AGAIN(errno))
         continue;
       if (errno == EOVERFLOW) {
