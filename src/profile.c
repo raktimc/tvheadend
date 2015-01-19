@@ -1018,7 +1018,8 @@ typedef struct profile_transcode {
   int      pro_mc;
   uint32_t pro_resolution;
   uint32_t pro_channels;
-  uint32_t pro_bandwidth;
+  uint32_t pro_vbitrate;
+  uint32_t pro_abitrate;
   char    *pro_language;
   char    *pro_vcodec;
   char    *pro_acodec;
@@ -1215,12 +1216,26 @@ const idclass_t profile_transcode_class =
       .list     = profile_class_vcodec_list,
     },
     {
+      .type     = PT_U32,
+      .id       = "vbitrate",
+      .name     = "Video Bitrate (kb/s) (0=Auto)",
+      .off      = offsetof(profile_transcode_t, pro_vbitrate),
+      .def.u32  = 0,
+    },
+    {
       .type     = PT_STR,
       .id       = "acodec",
       .name     = "Audio Codec",
       .off      = offsetof(profile_transcode_t, pro_acodec),
       .def.s    = "libvorbis",
       .list     = profile_class_acodec_list,
+    },
+    {
+      .type     = PT_U32,
+      .id       = "abitrate",
+      .name     = "Audio Bitrate (kb/s) (0=Auto)",
+      .off      = offsetof(profile_transcode_t, pro_abitrate),
+      .def.u32  = 0,
     },
     {
       .type     = PT_STR,
@@ -1241,9 +1256,15 @@ profile_transcode_resolution(profile_transcode_t *pro)
 }
 
 static int
-profile_transcode_bandwidth(profile_transcode_t *pro)
+profile_transcode_vbitrate(profile_transcode_t *pro)
 {
-  return pro->pro_bandwidth >= 64 ? pro->pro_bandwidth : 64;
+  return pro->pro_vbitrate;
+}
+
+static int
+profile_transcode_abitrate(profile_transcode_t *pro)
+{
+  return pro->pro_abitrate;
 }
 
 static int
@@ -1268,7 +1289,9 @@ profile_transcode_can_share(profile_chain_t *prch,
     return 0;
   if (profile_transcode_resolution(pro1) != profile_transcode_resolution(pro2))
     return 0;
-  if (profile_transcode_bandwidth(pro1) != profile_transcode_bandwidth(pro2))
+  if (profile_transcode_vbitrate(pro1) != profile_transcode_vbitrate(pro2))
+    return 0;
+  if (profile_transcode_abitrate(pro1) != profile_transcode_abitrate(pro2))
     return 0;
   if (strcmp(pro1->pro_language ?: "", pro2->pro_language ?: ""))
     return 0;
@@ -1296,7 +1319,8 @@ profile_transcode_work(profile_chain_t *prch,
   strncpy(props.tp_scodec, pro->pro_scodec ?: "", sizeof(props.tp_scodec)-1);
   props.tp_resolution = profile_transcode_resolution(pro);
   props.tp_channels   = pro->pro_channels;
-  props.tp_bandwidth  = profile_transcode_bandwidth(pro);
+  props.tp_vbitrate   = profile_transcode_vbitrate(pro);
+  props.tp_abitrate   = profile_transcode_abitrate(pro);
   strncpy(props.tp_language, pro->pro_language ?: "", 3);
 
   dst = prch->prch_gh = globalheaders_create(dst);

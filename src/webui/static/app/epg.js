@@ -562,6 +562,10 @@ tvheadend.epg = function() {
         width: 200
     });
 
+    var epgFilterFulltext = new Ext.form.Checkbox({
+        width: 20
+    });
+
     // Channels, uses global store
 
     var epgFilterChannels = new Ext.form.ComboBox({
@@ -662,6 +666,11 @@ tvheadend.epg = function() {
         epgFilterTitle.setValue("");
     };
 
+    clearFulltextFilter = function() {
+        delete epgStore.baseParams.fulltext;
+        epgFilterFulltext.setValue(0);
+    };
+
     clearChannelFilter = function() {
         delete epgStore.baseParams.channel;
         epgFilterChannels.setValue("");
@@ -685,6 +694,7 @@ tvheadend.epg = function() {
 
     function epgQueryClear() {
         clearTitleFilter();
+        clearFulltextFilter();
         clearChannelFilter();
         clearChannelTagsFilter();
         clearDurationFilter();
@@ -752,6 +762,13 @@ tvheadend.epg = function() {
         }
     });
 
+    epgFilterFulltext.on('check', function(c, value) {
+        if (epgStore.baseParams.fulltext !== value) {
+            epgStore.baseParams.fulltext = value;
+            epgView.reset();
+        }
+    });
+
     var epgView = new Ext.ux.grid.livegrid.GridView({
         nearLimit: 100,
         loadMask: {
@@ -777,7 +794,7 @@ tvheadend.epg = function() {
     });
 
     var tbar = [
-        epgFilterTitle, '-',
+        epgFilterTitle, { text: 'Fulltext' }, epgFilterFulltext, '-',
         epgFilterChannels, '-',
         epgFilterChannelTags, '-',
         epgFilterContentGroup, '-',
@@ -898,6 +915,7 @@ tvheadend.epg = function() {
 
         var title = epgStore.baseParams.title ? epgStore.baseParams.title
                 : "<i>Don't care</i>";
+        var fulltext = epgStore.baseParams.fulltext ? " <i>(Fulltext)</i>" : "";
         var channel = epgStore.baseParams.channel ? tvheadend.channelLookupName(epgStore.baseParams.channel)
                 : "<i>Don't care</i>";
         var tag = epgStore.baseParams.channelTag ? tvheadend.channelTagLookupName(epgStore.baseParams.channelTag)
@@ -910,7 +928,7 @@ tvheadend.epg = function() {
         Ext.MessageBox.confirm('Auto Recorder', 'This will create an automatic rule that '
                 + 'continuously scans the EPG for programmes '
                 + 'to record that match this query: ' + '<br><br>'
-                + '<div class="x-smallhdr">Title:</div>' + title + '<br>'
+                + '<div class="x-smallhdr">Title:</div>' + title + fulltext + '<br>'
                 + '<div class="x-smallhdr">Channel:</div>' + channel + '<br>'
                 + '<div class="x-smallhdr">Tag:</div>' + tag + '<br>'
                 + '<div class="x-smallhdr">Genre:</div>' + contentType + '<br>'
@@ -931,6 +949,7 @@ tvheadend.epg = function() {
           comment: 'Created from EPG query'
         };
         if (params.title) conf.title = params.title;
+        if (params.fulltext) conf.fulltext = params.fulltext;
         if (params.channel) conf.channel = params.channel;
         if (params.channelTag) conf.tag = params.channelTag;
         if (params.contentType) conf.content_type = params.contentType;

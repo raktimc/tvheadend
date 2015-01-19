@@ -727,6 +727,13 @@ const idclass_t dvr_config_class = {
       .off      = offsetof(dvr_config_t, dvr_whitespace_in_title),
       .group    = 5,
     },
+    {
+      .type     = PT_BOOL,
+      .id       = "windows-compatible-filenames",
+      .name     = "Use Windows-compatible filenames",
+      .off      = offsetof(dvr_config_t, dvr_windows_compatible_filenames),
+      .group    = 5,
+    },
     {}
   },
 };

@@ -172,6 +172,14 @@ const idclass_t mpegts_network_class =
       .off      = offsetof(mpegts_network_t, mn_idlescan),
       .def.i    = 0,
       .notify   = mpegts_network_class_idlescan_notify,
+      .opts     = PO_ADVANCED | PO_HIDDEN,
+    },
+    {
+      .type     = PT_BOOL,
+      .id       = "sid_chnum",
+      .name     = "Service IDs as Channel Numbers",
+      .off      = offsetof(mpegts_network_t, mn_sid_chnum),
+      .def.i    = 0,
     },
     {
       .type     = PT_BOOL,
@@ -186,6 +194,13 @@ const idclass_t mpegts_network_class =
       .name     = "Character Set",
       .off      = offsetof(mpegts_network_t, mn_charset),
       .list     = dvb_charset_enum,
+      .opts     = PO_ADVANCED,
+    },
+    {
+      .type     = PT_BOOL,
+      .id       = "localtime",
+      .name     = "EIT Local Time",
+      .off      = offsetof(mpegts_network_t, mn_localtime),
       .opts     = PO_ADVANCED,
     },
     {
@@ -391,6 +406,14 @@ mpegts_network_set_network_name
   mn->mn_display_name(mn, buf, sizeof(buf));
   tvhdebug("mpegts", "%s - set name %s", buf, name);
   return 1;
+}
+
+void
+mpegts_network_scan ( mpegts_network_t *mn )
+{
+  mpegts_mux_t *mm;
+  LIST_FOREACH(mm, &mn->mn_muxes, mm_network_link)
+    mpegts_mux_scan_state_set(mm, MM_SCAN_STATE_PEND);
 }
 
 /******************************************************************************

@@ -60,6 +60,11 @@
   <dd>If checked, broadcasts with matching title and matching non-zero episode number 
       are considered duplicates.
 
+  <dt>EPG update window
+  <dd>Maximum difference between event start times when the EPG event is changed.
+      TVHeadend uses a fuzzy match logic (using title, start times,
+      duration, episode) to check when the event was changed.
+
   <dt>Post-processor command
   <dd>Command to run after finishing a recording. The command will be run in background and is executed even if a recording is aborted or an error occurred. Use the %e error formatting string to check for errors, the error string is "OK" if recording finished successfully.
       <br><br>
@@ -171,10 +176,19 @@
   <dd>If checked, insert the episode number before the data and time rather than after (assumes <i>Include date</i>, <i>Include time</i> and <i>Include episode</i> options are set).
 	  
   <dt>Remove all unsafe characters from filename
-  <dd>If checked, all characters that could possibly cause problems for filenaming will be removed.
+  <dd>If checked, all characters that could possibly cause problems for filenaming will be replaced with '_'.<br>
+  	  Applies to characters:<br>
+      * not supported by Windows characters: <i>/ : \ < > | * ? ' "</i><br>
+      * control characters (ASCII code below 32)<br>
+      * control and national characters (ASCII code above 122)<br> 
   
   <dt>Replace whitespace in title with '-'
-  <dd>If checked, all whitespace characters will be replaced with '-'.
+  <dd>If checked, whitespace characters (spaces and tabs) will be replaced with '-'.
+  
+  <dt>Use Windows-compatible filenames
+  <dd>If checked:<br>
+      * special characters not supported by Windows like: <i>/ : \ < > | * ? ' "</i> will be replaced with '_'<br>
+      * trailing spaces ' ' and dots '.' will be removed
   
  </dl>
  Changes to any of these settings must be confirmed by pressing the 'Save configuration' button before taking effect.

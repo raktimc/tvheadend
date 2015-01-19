@@ -33,6 +33,7 @@
 #include <linux/dvb/dmx.h>
 #include <linux/dvb/frontend.h> 
 
+#define NOSIGNAL(x) (((x) & FE_HAS_SIGNAL) == 0)
 
 static void
 linuxdvb_frontend_monitor ( void *aux );
@@ -93,10 +94,31 @@ const idclass_t linuxdvb_frontend_class =
     },
     {
       .type     = PT_U32,
+      .id       = "tune_repeats",
+      .name     = "Tune Repeats",
+      .opts     = PO_ADVANCED,
+      .off      = offsetof(linuxdvb_frontend_t, lfe_tune_repeats),
+    },
+    {
+      .type     = PT_U32,
       .id       = "skip_bytes",
       .name     = "Skip Initial Bytes",
       .opts     = PO_ADVANCED,
       .off      = offsetof(linuxdvb_frontend_t, lfe_skip_bytes),
+    },
+    {
+      .type     = PT_U32,
+      .id       = "ibuf_size",
+      .name     = "Input Buffer (Bytes)",
+      .opts     = PO_ADVANCED,
+      .off      = offsetof(linuxdvb_frontend_t, lfe_ibuf_size),
+    },
+    {
+      .type     = PT_U32,
+      .id       = "status_period",
+      .name     = "Status Period (ms)",
+      .opts     = PO_ADVANCED,
+      .off      = offsetof(linuxdvb_frontend_t, lfe_status_period),
     },
     {}
   }
@@ -209,6 +231,8 @@ linuxdvb_frontend_enabled_updated ( mpegts_input_t *mi )
     if (lfe->lfe_fe_fd > 0) {
       close(lfe->lfe_fe_fd);
       lfe->lfe_fe_fd = -1;
+      if (lfe->lfe_satconf)
+        linuxdvb_satconf_reset(lfe->lfe_satconf);
     }
     gtimer_disarm(&lfe->lfe_monitor_timer);
 
@@ -293,9 +317,10 @@ linuxdvb_frontend_stop_mux
   }
 
   /* Not locked */
-  lfe->lfe_ready  = 0;
-  lfe->lfe_locked = 0;
-  lfe->lfe_status = 0;
+  lfe->lfe_ready   = 0;
+  lfe->lfe_locked  = 0;
+  lfe->lfe_status  = 0;
+  lfe->lfe_status2 = 0;
 
   /* Ensure it won't happen immediately */
   gtimer_arm(&lfe->lfe_monitor_timer, linuxdvb_frontend_monitor, lfe, 2);
@@ -304,6 +329,7 @@ linuxdvb_frontend_stop_mux
     linuxdvb_satconf_post_stop_mux(lfe->lfe_satconf);
 
   lfe->lfe_in_setup = 0;
+  lfe->lfe_freq = 0;
 }
 
 static int
@@ -322,6 +348,13 @@ linuxdvb_frontend_start_mux
   if (res)
     lfe->lfe_in_setup = 0;
   return res;
+}
+
+void
+linuxdvb_filter_close
+  ( int fd )
+{
+  close(fd);
 }
 
 static void
@@ -463,7 +496,8 @@ linuxdvb_frontend_monitor ( void *aux )
   signal_status_t sigstat;
   streaming_message_t sm;
   service_t *s;
-  int logit = 0;
+  int logit = 0, retune;
+  uint32_t period = MIN(MAX(250, lfe->lfe_status_period), 8000);
 #if DVB_VER_ATLEAST(5,10)
   struct dtv_property fe_properties[6];
   struct dtv_properties dtv_prop;
@@ -482,6 +516,8 @@ linuxdvb_frontend_monitor ( void *aux )
     tvhtrace("linuxdvb", "%s - closing frontend", buf);
     close(lfe->lfe_fe_fd);
     lfe->lfe_fe_fd = -1;
+    if (lfe->lfe_satconf)
+      linuxdvb_satconf_reset(lfe->lfe_satconf);
   }
 
   /* Check accessibility */
@@ -497,7 +533,7 @@ linuxdvb_frontend_monitor ( void *aux )
   if (!mmi || !lfe->lfe_ready) return;
 
   /* re-arm */
-  gtimer_arm(&lfe->lfe_monitor_timer, linuxdvb_frontend_monitor, lfe, 1);
+  gtimer_arm_ms(&lfe->lfe_monitor_timer, linuxdvb_frontend_monitor, lfe, period);
 
   /* Get current status */
   if (ioctl(lfe->lfe_fe_fd, FE_READ_STATUS, &fe_status) == -1) {
@@ -527,7 +563,20 @@ linuxdvb_frontend_monitor ( void *aux )
   } else {
     tvhtrace("linuxdvb", "%s - status %d (%04X)", buf, status, fe_status);
   }
+  retune = NOSIGNAL(fe_status) && NOSIGNAL(lfe->lfe_status) && !NOSIGNAL(lfe->lfe_status2);
+  lfe->lfe_status2 = lfe->lfe_status;
   lfe->lfe_status = fe_status;
+
+  /* Retune check - we lost signal or no data were received */
+  if (retune || lfe->lfe_nodata) {
+    lfe->lfe_nodata = 0;
+    if (lfe->lfe_locked && lfe->lfe_freq > 0) {
+      tvhlog(LOG_WARNING, "linuxdvb", "%s - %s", buf, retune ? "retune" : "retune nodata");
+      linuxdvb_frontend_tune0(lfe, mmi, lfe->lfe_freq);
+      gtimer_arm_ms(&lfe->lfe_monitor_timer, linuxdvb_frontend_monitor, lfe, 50);
+      lfe->lfe_locked = 1;
+    }
+  }
 
   /* Get current mux */
   mm = mmi->mmi_mux;
@@ -567,6 +616,10 @@ linuxdvb_frontend_monitor ( void *aux )
         return;
       lfe->lfe_monitor = dispatch_clock + 1;
     }
+  } else {
+    if (dispatch_clock < lfe->lfe_monitor)
+      return;
+    lfe->lfe_monitor = dispatch_clock + (period + 999) / 1000;
   }
 
   /* Statistics - New API */
@@ -844,13 +897,13 @@ linuxdvb_frontend_input_thread ( void *aux )
   tvhpoll_add(efd, ev, 1);
 
   /* Allocate memory */
-  sbuf_init_fixed(&sb, 18800);
+  sbuf_init_fixed(&sb, MIN(MAX(18800, lfe->lfe_ibuf_size), 1880000));
 
   /* Read */
   while (tvheadend_running && lfe->lfe_running) {
     nfds = tvhpoll_wait(efd, ev, 1, 500);
     if (nfds < 1) continue;
-    
+
     /* Read */
     if ((n = sbuf_tsdebug_read(mmi->mmi_mux, &sb, dvr)) < 0) {
       if (ERRNO_AGAIN(errno))
@@ -965,6 +1018,42 @@ int linuxdvb2tvh_delsys ( int delsys )
 }
 #endif
 
+int
+linuxdvb_frontend_clear
+  ( linuxdvb_frontend_t *lfe )
+{
+  char buf1[256];
+
+  /* Open FE */
+  lfe->mi_display_name((mpegts_input_t*)lfe, buf1, sizeof(buf1));
+
+  if (lfe->lfe_fe_fd <= 0) {
+    lfe->lfe_fe_fd = tvh_open(lfe->lfe_fe_path, O_RDWR | O_NONBLOCK, 0);
+    tvhtrace("linuxdvb", "%s - opening FE %s (%d)", buf1, lfe->lfe_fe_path, lfe->lfe_fe_fd);
+    if (lfe->lfe_fe_fd <= 0) {
+      return SM_CODE_TUNING_FAILED;
+    }
+  }
+  lfe->lfe_locked  = 0;
+  lfe->lfe_status  = 0;
+  lfe->lfe_status2 = 0;
+
+#if DVB_API_VERSION >= 5
+  static struct dtv_property clear_p[] = {
+    { .cmd = DTV_CLEAR },
+  };
+  static struct dtv_properties clear_cmdseq = {
+    .num = 1,
+    .props = clear_p
+  };
+  if ((ioctl(lfe->lfe_fe_fd, FE_SET_PROPERTY, &clear_cmdseq)) != 0) {
+    tvherror("linuxdvb", "%s - DTV_CLEAR failed [e=%s]", buf1, strerror(errno));
+    return -1;
+  }
+#endif
+
+  return 0;
+}
 
 int
 linuxdvb_frontend_tune0
@@ -1099,18 +1188,10 @@ linuxdvb_frontend_tune0
   dvb_mux_conf_t *dmc;
   struct dvb_frontend_parameters p;
 
-  /* Open FE */
-  lfe->mi_display_name((mpegts_input_t*)lfe, buf1, sizeof(buf1));
+  r = linuxdvb_frontend_clear(lfe);
+  if (r) return r;
 
-  if (lfe->lfe_fe_fd <= 0) {
-    lfe->lfe_fe_fd = tvh_open(lfe->lfe_fe_path, O_RDWR | O_NONBLOCK, 0);
-    tvhtrace("linuxdvb", "%s - opening FE %s (%d)", buf1, lfe->lfe_fe_path, lfe->lfe_fe_fd);
-    if (lfe->lfe_fe_fd <= 0) {
-      return SM_CODE_TUNING_FAILED;
-    }
-  }
-  lfe->lfe_locked = 0;
-  lfe->lfe_status = 0;
+  lfe->mi_display_name((mpegts_input_t*)lfe, buf1, sizeof(buf1));
 
   /*
    * copy the universal parameters to the Linux kernel structure
@@ -1158,7 +1239,7 @@ linuxdvb_frontend_tune0
   }
 
   if (freq != (uint32_t)-1)
-    p.frequency = freq;
+    p.frequency = lfe->lfe_freq = freq;
 
   if (dmc->dmc_fe_type != lfe->lfe_type) {
     tvherror("linuxdvb", "%s - failed to tune [type does not match %i != %i]", buf1, dmc->dmc_fe_type, lfe->lfe_type);
@@ -1170,18 +1251,6 @@ linuxdvb_frontend_tune0
   struct dtv_property cmds[20];
   struct dtv_properties cmdseq;
   
-  /* Clear Q */
-  static struct dtv_property clear_p[] = {
-    { .cmd = DTV_CLEAR },
-  };
-  static struct dtv_properties clear_cmdseq = {
-    .num = 1,
-    .props = clear_p
-  };
-  if ((ioctl(lfe->lfe_fe_fd, FE_SET_PROPERTY, &clear_cmdseq)) != 0) {
-    tvherror("linuxdvb", "%s - DTV_CLEAR failed [e=%s]", buf1, strerror(errno));
-    return -1;
-  }
 
   if (freq == (uint32_t)-1)
     freq = p.frequency;
@@ -1276,7 +1345,7 @@ int
 linuxdvb_frontend_tune1
   ( linuxdvb_frontend_t *lfe, mpegts_mux_instance_t *mmi, uint32_t freq )
 {
-  int r;
+  int r, i, rep;
   char buf1[256], buf2[256];
 
   lfe->mi_display_name((mpegts_input_t*)lfe, buf1, sizeof(buf1));
@@ -1285,7 +1354,14 @@ linuxdvb_frontend_tune1
 
   /* Tune */
   tvhtrace("linuxdvb", "%s - tuning", buf1);
-  r = linuxdvb_frontend_tune0(lfe, mmi, freq);
+  rep = lfe->lfe_tune_repeats > 0 ? lfe->lfe_tune_repeats : 0;
+  for (i = 0; i <= rep; i++) {
+    if (i > 0)
+      usleep(15000);
+    r = linuxdvb_frontend_tune0(lfe, mmi, freq);
+    if (r)
+      break;
+  }
 
   /* Start monitor */
   if (!r) {
@@ -1356,6 +1432,8 @@ linuxdvb_frontend_create
   lfe->lfe_type = type;
   strncpy(lfe->lfe_name, name, sizeof(lfe->lfe_name));
   lfe->lfe_name[sizeof(lfe->lfe_name)-1] = '\0';
+  lfe->lfe_ibuf_size = 18800;
+  lfe->lfe_status_period = 1000;
   lfe = (linuxdvb_frontend_t*)mpegts_input_create0((mpegts_input_t*)lfe, idc, uuid, conf);
   if (!lfe) return NULL;
 

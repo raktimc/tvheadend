@@ -198,7 +198,7 @@ subscription_show_none(th_subscription_t *s)
 {
   channel_t *ch = s->ths_channel;
   tvhlog(LOG_NOTICE, "subscription",
-	 "%04X: No transponder available for subscription \"%s\" "
+	 "%04X: No input source available for subscription \"%s\" "
 	 "to channel \"%s\"",
 	   shortid(s), s->ths_title, ch ? channel_get_name(ch) : "none");
 }
@@ -464,7 +464,7 @@ subscription_input(void *opauqe, streaming_message_t *sm)
     }
 
     if(sm->sm_type == SMT_SERVICE_STATUS &&
-       sm->sm_code & (TSS_GRACEPERIOD | TSS_ERRORS)) {
+       sm->sm_code & TSS_ERRORS) {
       // No, mark our subscription as bad_service
       // the scheduler will take care of things
       error = tss2errcode(sm->sm_code);
@@ -493,7 +493,7 @@ subscription_input(void *opauqe, streaming_message_t *sm)
   }
 
   if (sm->sm_type == SMT_SERVICE_STATUS &&
-      sm->sm_code & TSS_TIMEOUT) {
+      sm->sm_code & (TSS_TUNING|TSS_TIMEOUT)) {
     error = tss2errcode(sm->sm_code);
     if (error > s->ths_testing_error)
       s->ths_testing_error = error;
@@ -561,6 +561,7 @@ subscription_unsubscribe(th_subscription_t *s)
   free(s->ths_hostname);
   free(s->ths_username);
   free(s->ths_client);
+  free(s->ths_dvrfile);
   free(s);
 
   gtimer_arm(&subscription_reschedule_timer, 
@@ -742,8 +743,11 @@ mux_data_timeout ( void *aux )
   th_subscription_t *s = aux;
   mpegts_input_t *mi = s->ths_mmi->mmi_input;
 
+  if (!s->ths_mmi)
+    return;
+
   if (!mi->mi_live) {
-    subscription_unlink_mux(s, SM_CODE_NO_INPUT);
+    mpegts_mux_remove_subscriber(s->ths_mmi->mmi_mux, s, SM_CODE_NO_INPUT);
     return;
   }
   mi->mi_live = 0;
@@ -754,6 +758,7 @@ mux_data_timeout ( void *aux )
 
 th_subscription_t *
 subscription_create_from_mux(profile_chain_t *prch,
+                             tvh_input_t *ti,
                              unsigned int weight,
                              const char *name,
                              int flags,
@@ -770,7 +775,7 @@ subscription_create_from_mux(profile_chain_t *prch,
   int r;
 
   /* Tune */
-  r = mm->mm_start(mm, name, weight, flags);
+  r = mm->mm_start(mm, (mpegts_input_t *)ti, name, weight, flags);
   if (r) {
     if (err) *err = r;
     return NULL;
@@ -893,6 +898,9 @@ subscription_create_msg(th_subscription_t *s)
   
   if(s->ths_service != NULL)
     htsmsg_add_str(m, "service", s->ths_service->s_nicename ?: "");
+
+  else if(s->ths_dvrfile != NULL)
+    htsmsg_add_str(m, "service", s->ths_dvrfile ?: "");
 
   else if (s->ths_mmi != NULL && s->ths_mmi->mmi_mux != NULL) {
     char buf[512];

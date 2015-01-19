@@ -34,8 +34,30 @@ typedef struct globalheaders {
 
 } globalheaders_t;
 
-#define MAX_SCAN_TIME 1500  // in ms
+#define PTS_MASK      0x1ffffffffLL
+#define MAX_SCAN_TIME 3000  // in ms
 
+/**
+ *
+ */
+static inline int
+gh_require_meta(int type)
+{
+  return type == SCT_H264 ||
+         type == SCT_MPEG2VIDEO ||
+         type == SCT_MP4A ||
+         type == SCT_AAC ||
+         type == SCT_VORBIS;
+}
+
+/**
+ *
+ */
+static inline int
+gh_is_audiovideo(int type)
+{
+  return SCT_ISVIDEO(type) || SCT_ISAUDIO(type);
+}
 
 /**
  *
@@ -99,58 +121,125 @@ apply_header(streaming_start_component_t *ssc, th_pkt_t *pkt)
 static int
 header_complete(streaming_start_component_t *ssc, int not_so_picky)
 {
-  if((SCT_ISAUDIO(ssc->ssc_type) || SCT_ISVIDEO(ssc->ssc_type)) &&
-     ssc->ssc_frameduration == 0)
+  int is_video = SCT_ISVIDEO(ssc->ssc_type);
+  int is_audio = !is_video && SCT_ISAUDIO(ssc->ssc_type);
+
+  if((is_audio || is_video) && ssc->ssc_frameduration == 0)
     return 0;
 
-  if(SCT_ISVIDEO(ssc->ssc_type)) {
-    if(!not_so_picky && (ssc->ssc_aspect_num == 0 || ssc->ssc_aspect_den == 0))
+  if(is_video) {
+    if(!not_so_picky && (ssc->ssc_aspect_num == 0 || ssc->ssc_aspect_den == 0 ||
+                         ssc->ssc_width == 0 || ssc->ssc_height == 0))
       return 0;
   }
 
-  if(SCT_ISAUDIO(ssc->ssc_type) &&
-     (ssc->ssc_sri == 0 || ssc->ssc_channels == 0))
+  if(is_audio && (ssc->ssc_sri == 0 || ssc->ssc_channels == 0))
     return 0;
   
-  if(ssc->ssc_gh == NULL &&
-     (ssc->ssc_type == SCT_H264 ||
-      ssc->ssc_type == SCT_MPEG2VIDEO ||
-      ssc->ssc_type == SCT_MP4A ||
-      ssc->ssc_type == SCT_AAC ||
-      ssc->ssc_type == SCT_VORBIS))
+  if(ssc->ssc_gh == NULL && gh_require_meta(ssc->ssc_type))
     return 0;
+
   return 1;
 }
+
+
+/**
+ *
+ */
+static int64_t
+gh_queue_delay(globalheaders_t *gh, int index)
+{
+  th_pktref_t *f = TAILQ_FIRST(&gh->gh_holdq);
+  th_pktref_t *l = TAILQ_LAST(&gh->gh_holdq, th_pktref_queue);
+  streaming_start_component_t *ssc;
+  int64_t diff;
+
+  /*
+   * Find only packets which require the meta data. Ignore others.
+   */
+  while (f != l) {
+    ssc = streaming_start_component_find_by_index
+            (gh->gh_ss, f->pr_pkt->pkt_componentindex);
+    if (ssc && ssc->ssc_index == index)
+      break;
+    f = TAILQ_NEXT(f, pr_link);
+  }
+  while (l != f) {
+    ssc = streaming_start_component_find_by_index
+            (gh->gh_ss, l->pr_pkt->pkt_componentindex);
+    if (ssc && ssc->ssc_index == index)
+      break;
+    l = TAILQ_PREV(l, th_pktref_queue, pr_link);
+  }
+
+  diff = (l->pr_pkt->pkt_dts & PTS_MASK) - (f->pr_pkt->pkt_dts & PTS_MASK);
+  if (diff < 0)
+    diff += PTS_MASK;
+
+  /* special noop packet from transcoder, increase decision limit */
+  if (l == f && l->pr_pkt->pkt_payload == NULL)
+    return 1;
+
+  return diff;
+}
+
 
 /**
  *
  */
 static int
-headers_complete(globalheaders_t *gh, int64_t qd)
+headers_complete(globalheaders_t *gh)
 {
   streaming_start_t *ss = gh->gh_ss;
   streaming_start_component_t *ssc;
-  int i, threshold = qd > (MAX_SCAN_TIME * 90);
+  int64_t *qd = alloca(ss->ss_num_components * sizeof(int64_t));
+  int64_t qd_max = 0;
+  int i, threshold = 0;
 
   assert(ss != NULL);
- 
+
+  for(i = 0; i < ss->ss_num_components; i++) {
+    ssc = &ss->ss_components[i];
+    qd[i] = gh_is_audiovideo(ssc->ssc_type) ?
+              gh_queue_delay(gh, ssc->ssc_index) : 0;
+    if (qd[i] > qd_max)
+      qd_max = qd[i];
+  }
+
+  if (qd_max <= 0)
+    return 0;
+
+  threshold = qd_max > MAX_SCAN_TIME * 90;
+
   for(i = 0; i < ss->ss_num_components; i++) {
     ssc = &ss->ss_components[i];
 
     if(!header_complete(ssc, threshold)) {
-
-      if(threshold) {
-        tvhwarn("parser", "stream %d %s%s%s (PID %i) disabled (no packets)",
-                ssc->ssc_index,
-                streaming_component_type2txt(ssc->ssc_type),
-                ssc->ssc_lang[0] ? " " : "", ssc->ssc_lang,
-                ssc->ssc_pid);
+      /*
+       * disable stream only when
+       * - half timeout is reached without any packets seen
+       * - maximal timeout is reached without metadata
+       */
+      if(threshold || (qd[i] <= 0 && qd_max > (MAX_SCAN_TIME * 90) / 2)) {
 	ssc->ssc_disabled = 1;
       } else {
 	return 0;
       }
+    } else {
+      ssc->ssc_disabled = 0;
     }
   }
+
+#if ENABLE_TRACE
+  for(i = 0; i < ss->ss_num_components; i++) {
+    ssc = &ss->ss_components[i];
+    tvhtrace("parser", "stream %d %s%s%s (PID %i) complete time %"PRId64"%s",
+             ssc->ssc_index, streaming_component_type2txt(ssc->ssc_type),
+             ssc->ssc_lang[0] ? " " : "", ssc->ssc_lang, ssc->ssc_pid,
+             gh_queue_delay(gh, ssc->ssc_index),
+             ssc->ssc_disabled ? " disabled" : "");
+  }
+#endif
 
   return 1;
 }
@@ -159,13 +248,11 @@ headers_complete(globalheaders_t *gh, int64_t qd)
 /**
  *
  */
-static int64_t 
-gh_queue_delay(globalheaders_t *gh)
+static void
+gh_start(globalheaders_t *gh, streaming_message_t *sm)
 {
-  th_pktref_t *f = TAILQ_FIRST(&gh->gh_holdq);
-  th_pktref_t *l = TAILQ_LAST(&gh->gh_holdq, th_pktref_queue);
-
-  return l->pr_pkt->pkt_dts - f->pr_pkt->pkt_dts;
+  gh->gh_ss = streaming_start_copy(sm->sm_data);
+  streaming_msg_free(sm);
 }
 
 
@@ -186,12 +273,6 @@ gh_hold(globalheaders_t *gh, streaming_message_t *sm)
 						  pkt->pkt_componentindex);
     assert(ssc != NULL);
 
-    if(ssc->ssc_type == SCT_TELETEXT) {
-      streaming_msg_free(sm);
-      ssc->ssc_disabled = 1;
-      break;
-    }
-
     pkt_ref_inc(pkt);
 
     apply_header(ssc, pkt);
@@ -200,7 +281,10 @@ gh_hold(globalheaders_t *gh, streaming_message_t *sm)
 
     streaming_msg_free(sm);
 
-    if(!headers_complete(gh, gh_queue_delay(gh))) 
+    if(!gh_is_audiovideo(ssc->ssc_type))
+      break;
+
+    if(!headers_complete(gh))
       break;
 
     // Send our modified start
@@ -211,9 +295,12 @@ gh_hold(globalheaders_t *gh, streaming_message_t *sm)
     // Send all pending packets
     while((pr = TAILQ_FIRST(&gh->gh_holdq)) != NULL) {
       TAILQ_REMOVE(&gh->gh_holdq, pr, pr_link);
-      sm = streaming_msg_create_pkt(pr->pr_pkt);
-      streaming_target_deliver2(gh->gh_output, sm);
-      pkt_ref_dec(pr->pr_pkt);
+      pkt = pr->pr_pkt;
+      if (pkt->pkt_payload) {
+        sm = streaming_msg_create_pkt(pkt);
+        streaming_target_deliver2(gh->gh_output, sm);
+      }
+      pkt_ref_dec(pkt);
       free(pr);
     }
     gh->gh_passthru = 1;
@@ -221,8 +308,7 @@ gh_hold(globalheaders_t *gh, streaming_message_t *sm)
 
   case SMT_START:
     assert(gh->gh_ss == NULL);
-    gh->gh_ss = streaming_start_copy(sm->sm_data);
-    streaming_msg_free(sm);
+    gh_start(gh, sm);
     break;
 
   case SMT_STOP:
@@ -251,14 +337,14 @@ gh_hold(globalheaders_t *gh, streaming_message_t *sm)
 static void
 gh_pass(globalheaders_t *gh, streaming_message_t *sm)
 {
+  th_pkt_t *pkt;
   switch(sm->sm_type) {
   case SMT_START:
     /* stop */
     gh->gh_passthru = 0;
     gh_flush(gh);
     /* restart */
-    gh->gh_ss = streaming_start_copy(sm->sm_data);
-    streaming_msg_free(sm);
+    gh_start(gh, sm);
     break;
     
   case SMT_STOP:
@@ -270,12 +356,18 @@ gh_pass(globalheaders_t *gh, streaming_message_t *sm)
   case SMT_SERVICE_STATUS:
   case SMT_SIGNAL_STATUS:
   case SMT_NOSTART:
-  case SMT_PACKET:
   case SMT_MPEGTS:
   case SMT_SKIP:
   case SMT_SPEED:
   case SMT_TIMESHIFT_STATUS:
     streaming_target_deliver2(gh->gh_output, sm);
+    break;
+  case SMT_PACKET:
+    pkt = sm->sm_data;
+    if (pkt->pkt_payload)
+      streaming_target_deliver2(gh->gh_output, sm);
+    else
+      streaming_msg_free(sm);
     break;
   }
 }

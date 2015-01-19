@@ -140,6 +140,76 @@ mpegts_input_enabled_notify ( void *p )
     mi->mi_enabled_updated(mi);
 }
 
+static int
+mpegts_input_class_linked_set ( void *self, const void *val )
+{
+  mpegts_input_t *mi = self, *mi2;
+
+  if (strcmp(val ?: "", mi->mi_linked ?: "")) {
+    mi2 = mpegts_input_find(mi->mi_linked);
+    free(mi->mi_linked);
+    mi->mi_linked = NULL;
+    if (mi2) {
+      free(mi2->mi_linked);
+      mi2->mi_linked = NULL;
+      mpegts_mux_unsubscribe_linked(mi2);
+    }
+    mpegts_mux_unsubscribe_linked(mi);
+    if (val && ((char *)val)[0]) {
+      mi->mi_linked = strdup((char *)val);
+      mi2 = mpegts_input_find((char *)val);
+      if (mi2) {
+        free(mi2->mi_linked);
+        mi2->mi_linked = strdup(idnode_uuid_as_str(&mi->ti_id));
+      }
+    }
+    if (mi2)
+      idnode_changed(&mi2->ti_id);
+    return 1;
+  }
+  return 0;
+}
+
+static const void *
+mpegts_input_class_linked_get ( void *self )
+{
+  static const char *ptr;
+  mpegts_input_t *mi = self;
+  ptr = "";
+  if (mi->mi_linked) {
+    mi = mpegts_input_find(mi->mi_linked);
+    if (mi)
+      ptr = idnode_uuid_as_str(&mi->ti_id);
+  }
+  return &ptr;
+}
+
+static void
+mpegts_input_add_keyval(htsmsg_t *l, const char *key, const char *val)
+{
+  htsmsg_t *e = htsmsg_create_map();
+  htsmsg_add_str(e, "key", key);
+  htsmsg_add_str(e, "val", val);
+  htsmsg_add_msg(l, NULL, e);
+}
+
+static htsmsg_t *
+mpegts_input_class_linked_enum( void * self )
+{
+  mpegts_input_t *mi = self, *mi2;
+  tvh_input_t *ti;
+  htsmsg_t *m = htsmsg_create_list();
+  mpegts_input_add_keyval(m, "", "Not Linked");
+  TVH_INPUT_FOREACH(ti)
+    if (idnode_is_instance(&ti->ti_id, &mpegts_input_class)) {
+      mi2 = (mpegts_input_t *)ti;
+      if (mi2 != mi)
+        mpegts_input_add_keyval(m, idnode_uuid_as_str(&ti->ti_id),
+                                   idnode_get_title(&mi2->ti_id));
+  }
+  return m;
+}
+
 const idclass_t mpegts_input_class =
 {
   .ic_class      = "mpegts_input",
@@ -212,6 +282,14 @@ const idclass_t mpegts_input_class =
       .list     = mpegts_input_class_network_enum,
       .rend     = mpegts_input_class_network_rend,
     },
+    {
+      .type     = PT_STR,
+      .id       = "linked",
+      .name     = "Linked Input",
+      .set      = mpegts_input_class_linked_set,
+      .get      = mpegts_input_class_linked_get,
+      .list     = mpegts_input_class_linked_enum
+    },
     {}
   }
 };
@@ -235,19 +313,22 @@ mpegts_input_is_enabled ( mpegts_input_t *mi, mpegts_mux_t *mm, int flags )
 static void
 mpegts_input_display_name ( mpegts_input_t *mi, char *buf, size_t len )
 {
-  if (mi->mi_name)
-    strncpy(buf, mi->mi_name, len);
-  else
+  if (mi->mi_name) {
+    strncpy(buf, mi->mi_name, len - 1);
+    buf[len - 1] = '\0';
+  } else
     *buf = 0;
 }
 
 int
 mpegts_input_is_free ( mpegts_input_t *mi )
 {
-  char buf[256];
   mpegts_mux_instance_t *mmi = LIST_FIRST(&mi->mi_mux_active);
+#if ENABLE_TRACE
+  char buf[256];
   mi->mi_display_name(mi, buf, sizeof(buf));
   tvhtrace("mpegts", "%s - is free? %d", buf, mmi == NULL);
+#endif
   return mmi ? 0 : 1;
 }
 
@@ -385,7 +466,7 @@ mpegts_input_close_pid
     if (!RB_FIRST(&mp->mp_subs)) {
       RB_REMOVE(&mm->mm_pids, mp, mp_link);
       if (mp->mp_fd != -1)
-        close(mp->mp_fd);
+        linuxdvb_filter_close(mp->mp_fd);
       free(mp);
     }
   }
@@ -544,7 +625,7 @@ mpegts_input_stopped_mux
   ( mpegts_input_t *mi, mpegts_mux_instance_t *mmi )
 {
   char buf[256];
-  service_t *s;
+  service_t *s, *s_next;
 
   /* no longer active */
   LIST_REMOVE(mmi, mmi_active_link);
@@ -555,24 +636,26 @@ mpegts_input_stopped_mux
 
   mi->mi_display_name(mi, buf, sizeof(buf));
   tvhtrace("mpegts", "%s - flush subscribers", buf);
-  s = LIST_FIRST(&mi->mi_transports);
-  while (s) {
+  for (s = LIST_FIRST(&mi->mi_transports); s; s = s_next) {
+    s_next = LIST_NEXT(s, s_active_link);
     if (((mpegts_service_t*)s)->s_dvb_mux == mmi->mmi_mux)
       service_remove_subscriber(s, NULL, SM_CODE_SUBSCRIPTION_OVERRIDDEN);
-    s = LIST_NEXT(s, s_active_link);
   }
   notify_reload("input_status");
   mpegts_input_dbus_notify(mi, 0);
 
 #if ENABLE_TSDEBUG
   tsdebug_packet_t *tp;
-  close(mmi->mmi_mux->mm_tsdebug_fd);
-  close(mmi->mmi_mux->mm_tsdebug_fd2);
-  mmi->mmi_mux->mm_tsdebug_fd = -1;
-  mmi->mmi_mux->mm_tsdebug_fd2 = -1;
-  mmi->mmi_mux->mm_tsdebug_pos = 0;
-  while ((tp = TAILQ_FIRST(&mmi->mmi_mux->mm_tsdebug_packets)) != NULL) {
-    TAILQ_REMOVE(&mmi->mmi_mux->mm_tsdebug_packets, tp, link);
+  mpegts_mux_t *mm = mmi->mmi_mux;
+  if (mm->mm_tsdebug_fd >= 0)
+    close(mm->mm_tsdebug_fd);
+  if (mm->mm_tsdebug_fd2 >= 0)
+    close(mm->mm_tsdebug_fd2);
+  mm->mm_tsdebug_fd = -1;
+  mm->mm_tsdebug_fd2 = -1;
+  mm->mm_tsdebug_pos = 0;
+  while ((tp = TAILQ_FIRST(&mm->mm_tsdebug_packets)) != NULL) {
+    TAILQ_REMOVE(&mm->mm_tsdebug_packets, tp, link);
     free(tp);
   }
 #endif
@@ -592,6 +675,22 @@ mpegts_input_has_subscription ( mpegts_input_t *mi, mpegts_mux_t *mm )
   }
   pthread_mutex_unlock(&mi->mi_output_lock);
   return ret;
+}
+
+static void
+mpegts_input_tuning_error ( mpegts_input_t *mi, mpegts_mux_t *mm )
+{
+  service_t *t, *t_next;
+  pthread_mutex_lock(&mi->mi_output_lock);
+  for (t = LIST_FIRST(&mi->mi_transports); t; t = t_next) {
+    t_next = LIST_NEXT(t, s_active_link);
+    if (((mpegts_service_t*)t)->s_dvb_mux == mm) {
+      pthread_mutex_lock(&t->s_stream_mutex);
+      service_set_streaming_status_flags(t, TSS_TUNING);
+      pthread_mutex_unlock(&t->s_stream_mutex);
+    }
+  }
+  pthread_mutex_unlock(&mi->mi_output_lock);
 }
 
 /* **************************************************************************
@@ -832,7 +931,7 @@ mpegts_input_process
   mpegts_mux_instance_t *mmi;
   mpegts_pid_t *last_mp = NULL;
 #if ENABLE_TSDEBUG
-  off_t tsdebug_pos = mm->mm_tsdebug_pos;
+  off_t tsdebug_pos;
 #endif
 
   if (mm == NULL || (mmi = mm->mm_active) == NULL)
@@ -840,6 +939,9 @@ mpegts_input_process
 
   assert(mm == mmi->mmi_mux);
 
+#if ENABLE_TSDEBUG
+  tsdebug_pos = mm->mm_tsdebug_pos;
+#endif
   mi->mi_live = 1;
 
   /* Process */
@@ -863,9 +965,6 @@ mpegts_input_process
 #endif
       goto done;
     }
-
-    /* Remove in future or move it outside this loop */
-    lock_assert(&mi->mi_output_lock);
 
     /* Find PID */
     if ((mp = mpegts_mux_find_pid(mm, pid, 0))) {
@@ -1256,6 +1355,7 @@ mpegts_input_create0
   mi->mi_stopping_mux         = mpegts_input_stopping_mux;
   mi->mi_stopped_mux          = mpegts_input_stopped_mux;
   mi->mi_has_subscription     = mpegts_input_has_subscription;
+  mi->mi_tuning_error         = mpegts_input_tuning_error;
   mi->ti_get_streams          = mpegts_input_get_streams;
 
   /* Index */
@@ -1326,6 +1426,7 @@ mpegts_input_delete ( mpegts_input_t *mi, int delconf )
   pthread_mutex_destroy(&mi->mi_output_lock);
   pthread_cond_destroy(&mi->mi_table_cond);
   free(mi->mi_name);
+  free(mi->mi_linked);
   free(mi);
 }
 
@@ -1402,7 +1503,8 @@ mpegts_input_set_networks ( mpegts_input_t *mi, htsmsg_t *msg )
   return save;
 }
 
-int mpegts_input_grace( mpegts_input_t *mi, mpegts_mux_t *mm )
+int
+mpegts_input_grace( mpegts_input_t *mi, mpegts_mux_t *mm )
 {
   /* Get timeout */
   int t = 0;

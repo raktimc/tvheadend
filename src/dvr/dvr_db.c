@@ -332,6 +332,21 @@ dvr_entry_set_timer(dvr_entry_t *de)
 
 
 /**
+ * Get episode name
+ */
+static char *
+dvr_entry_get_episode(epg_broadcast_t *bcast, char *buf, int len)
+{
+  if (!bcast || !bcast->episode)
+    return NULL;
+  if (epg_episode_number_format(bcast->episode,
+                                buf, len, NULL,
+                                "Season %d", ".", "Episode %d", "/%d"))
+    return buf;
+  return NULL;
+}
+
+/**
  * Find dvr entry using 'fuzzy' search
  */
 static int
@@ -339,6 +354,7 @@ dvr_entry_fuzzy_match(dvr_entry_t *de, epg_broadcast_t *e)
 {
   time_t t1, t2;
   const char *title1, *title2;
+  char buf[64];
 
   /* Matching ID */
   if (de->de_dvb_eid && de->de_dvb_eid == e->dvb_eid)
@@ -357,26 +373,19 @@ dvr_entry_fuzzy_match(dvr_entry_t *de, epg_broadcast_t *e)
     return 0;
 
   /* Outside of window */
-  if ( abs(e->start - de->de_start) > de->de_config->dvr_update_window )
+  if (abs(e->start - de->de_start) > de->de_config->dvr_update_window)
     return 0;
   
   /* Title match (or contains?) */
-  return strcmp(title1, title2) == 0;
-}
+  if (strcmp(title1, title2))
+    return 0;
 
-/**
- * Set episode name
- */
-static char *
-dvr_entry_get_episode(epg_broadcast_t *bcast, char *buf, int len)
-{
-  if (!bcast || !bcast->episode)
-    return NULL;
-  if (epg_episode_number_format(bcast->episode,
-                                buf, len, NULL,
-                                "Season %d", ".", "Episode %d", "/%d"))
-    return buf;
-  return NULL;
+  /* episode check */
+  if (dvr_entry_get_episode(e, buf, sizeof(buf)) && de->de_episode)
+    if (strcmp(buf, de->de_episode))
+      return 0;
+
+  return 1;
 }
 
 /**
@@ -449,6 +458,7 @@ dvr_entry_create_(const char *config_uuid, epg_broadcast_t *e,
                   time_t start_extra, time_t stop_extra,
                   const char *title, const char *description,
                   const char *lang, epg_genre_t *content_type,
+                  const char *owner,
                   const char *creator, dvr_autorec_entry_t *dae,
                   dvr_timerec_entry_t *dte,
                   dvr_prio_t pri, int retention,
@@ -470,6 +480,7 @@ dvr_entry_create_(const char *config_uuid, epg_broadcast_t *e,
   htsmsg_add_str(conf, "config_name", config_uuid ?: "");
   htsmsg_add_s64(conf, "start_extra", start_extra);
   htsmsg_add_s64(conf, "stop_extra", stop_extra);
+  htsmsg_add_str(conf, "owner", owner ?: "");
   htsmsg_add_str(conf, "creator", creator ?: "");
   htsmsg_add_str(conf, "comment", comment ?: "");
   if (e) {
@@ -503,9 +514,15 @@ dvr_entry_create_(const char *config_uuid, epg_broadcast_t *e,
   if (e)
     htsmsg_add_u32(conf, "broadcast", e->id);
   if (dae)
+  {
     htsmsg_add_str(conf, "autorec", idnode_uuid_as_str(&dae->dae_id));
+    htsmsg_add_str(conf, "directory", dae->dae_directory ?: "");
+  }
   if (dte)
+  {
     htsmsg_add_str(conf, "timerec", idnode_uuid_as_str(&dte->dte_id));
+    htsmsg_add_str(conf, "directory", dte->dte_directory ?: "");
+  }
 
   de = dvr_entry_create(NULL, conf);
 
@@ -538,6 +555,7 @@ dvr_entry_create_htsp(const char *config_uuid,
                       const char *title,
                       const char *description, const char *lang,
                       epg_genre_t *content_type,
+                      const char *owner,
                       const char *creator, dvr_autorec_entry_t *dae,
                       dvr_prio_t pri, int retention,
                       const char *comment)
@@ -549,7 +567,7 @@ dvr_entry_create_htsp(const char *config_uuid,
                            NULL,
                            ch, start, stop, start_extra, stop_extra,
                            title, description, lang, content_type,
-                           creator, dae, NULL, pri, retention,
+                           owner, creator, dae, NULL, pri, retention,
                            comment);
 }
 
@@ -560,6 +578,7 @@ dvr_entry_t *
 dvr_entry_create_by_event(const char *config_uuid,
                           epg_broadcast_t *e,
                           time_t start_extra, time_t stop_extra,
+                          const char *owner,
                           const char *creator, dvr_autorec_entry_t *dae,
                           dvr_prio_t pri, int retention,
                           const char *comment)
@@ -572,7 +591,7 @@ dvr_entry_create_by_event(const char *config_uuid,
                            start_extra, stop_extra,
                            NULL, NULL, NULL,
                            LIST_FIRST(&e->episode->genre),
-                           creator, dae, NULL, pri, retention,
+                           owner, creator, dae, NULL, pri, retention,
                            comment);
 }
 
@@ -630,7 +649,7 @@ dvr_entry_create_by_autorec(epg_broadcast_t *e, dvr_autorec_entry_t *dae)
 
   dvr_entry_create_by_event(idnode_uuid_as_str(&dae->dae_config->dvr_id), e,
                             dae->dae_start_extra, dae->dae_stop_extra,
-                            buf, dae, dae->dae_pri, dae->dae_retention,
+                            dae->dae_owner, buf, dae, dae->dae_pri, dae->dae_retention,
                             dae->dae_comment);
 }
 
@@ -661,6 +680,7 @@ dvr_entry_dec_ref(dvr_entry_t *de)
     LIST_REMOVE(de, de_config_link);
 
   free(de->de_filename);
+  free(de->de_owner);
   free(de->de_creator);
   free(de->de_comment);
   if (de->de_title) lang_str_destroy(de->de_title);
@@ -1086,6 +1106,20 @@ static void
 dvr_entry_class_delete(idnode_t *self)
 {
   dvr_entry_cancel_delete((dvr_entry_t *)self);
+}
+
+static int
+dvr_entry_class_perm(idnode_t *self, access_t *a, htsmsg_t *msg_to_write)
+{
+  dvr_entry_t *de = (dvr_entry_t *)self;
+
+  if (access_verify2(a, ACCESS_OR|ACCESS_ADMIN|ACCESS_RECORDER))
+    return -1;
+  if (!access_verify2(a, ACCESS_ADMIN))
+    return 0;
+  if (dvr_entry_verify(de, a, msg_to_write == NULL ? 1 : 0))
+    return -1;
+  return 0;
 }
 
 static const char *
@@ -1660,10 +1694,10 @@ const idclass_t dvr_entry_class = {
   .ic_class     = "dvrentry",
   .ic_caption   = "DVR Entry",
   .ic_event     = "dvrentry",
-  .ic_perm_def  = ACCESS_RECORDER,
   .ic_save      = dvr_entry_class_save,
   .ic_get_title = dvr_entry_class_get_title,
   .ic_delete    = dvr_entry_class_delete,
+  .ic_perm      = dvr_entry_class_perm,
   .ic_properties = (const property_t[]) {
     {
       .type     = PT_TIME,
@@ -1812,6 +1846,13 @@ const idclass_t dvr_entry_class = {
     },
     {
       .type     = PT_STR,
+      .id       = "owner",
+      .name     = "Owner",
+      .off      = offsetof(dvr_entry_t, de_owner),
+      .opts     = PO_RDONLY,
+    },
+    {
+      .type     = PT_STR,
       .id       = "creator",
       .name     = "Creator",
       .off      = offsetof(dvr_entry_t, de_creator),
@@ -1822,6 +1863,13 @@ const idclass_t dvr_entry_class = {
       .id       = "filename",
       .name     = "Filename",
       .off      = offsetof(dvr_entry_t, de_filename),
+      .opts     = PO_RDONLY,
+    },
+    {
+      .type     = PT_STR,
+      .id       = "directory",
+      .name     = "Directory",
+      .off      = offsetof(dvr_entry_t, de_directory),
       .opts     = PO_RDONLY,
     },
     {
@@ -2026,7 +2074,7 @@ dvr_entry_delete(dvr_entry_t *de)
 
     snprintf(path, sizeof(path), "%s", cfg->dvr_storage);
 
-    if(cfg->dvr_title_dir || cfg->dvr_channel_dir || cfg->dvr_dir_per_day) {
+    if(cfg->dvr_title_dir || cfg->dvr_channel_dir || cfg->dvr_dir_per_day || de->de_directory) {
       char *p;
       int l;
 

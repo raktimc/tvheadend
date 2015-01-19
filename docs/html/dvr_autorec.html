@@ -51,9 +51,18 @@ Check or clear this box to enable or disable this rule.
 <dd>
 The name you've given to the rule, e.g. 'Stuff involving Jeremy Clarkson'.
 <p>
+<dt><b>Directory</b>
+<dd>
+When specified, this setting overrides the subdirectory rules specified by the DVR configuration and puts all recordings done by this entry into the specified subdirectory. Useful for e.g. recording multiple different news broadcasts into one common subdirectory called "News".
+<p>
 <dt><b>Title (Regexp)</b>
 <dd>
 The title of the programme to look for. Note that this accepts case-insensitive regular expressions, so you can use pattern matching as Tvheadend scans the EPG for programmes to record.
+<p>
+<dt><b>Fulltext</b>
+<dd>
+When the fulltext is checked, the title pattern is matched against title,
+subtitle, summary and description.
 <p>
 <dt><b>Channel</b>
 <dd>
@@ -79,15 +88,13 @@ The maximal duration of a matching event - in other words, only match programmes
 <dd>
 On which specific days of the week to find matching programmes.
 <p>
-<dt><b>Starting Around</b>
+<dt><b>Start After</b>
 <dd>
-An approximate starting time for matching programmes.
-<br>
-<br>
-I'd need to check the code to see how this works to expand on this any further. It used to be:
-<br>
-<br>
-Only record events if they are scheduled +-15 minutes from this given time.
+An event which starts between this "start after" and "start before" will be matched (including boundary values).
+<p>
+<dt><b>Start Before</b>
+<dd>
+An event which starts between this "start after" and "start before" will be matched (including boundary values).
 <p>
 <dt><b>Priority</b>
 <dd>

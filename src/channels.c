@@ -645,17 +645,14 @@ channel_get_icon ( channel_t *ch )
         (chname = channel_get_name(ch)) != NULL && chname[0]) {
       const char *chi, *send, *sname, *s;
       chi = strdup(chicon);
-      send = strstr(chi, "%C");
-      if (send == NULL) {
-        buf[0] = '\0';
-        sname = "";
-      } else {
-        *(char *)send = '\0';
-        send += 2;
+
+      /* Check for and replace placeholders */
+      if ((send = strstr(chi, "%C"))) {
         sname = intlconv_utf8safestr(intlconv_charset_id("ASCII", 1, 1),
                                      chname, strlen(chname) * 2);
         if (sname == NULL)
           sname = strdup(chname);
+
         /* Remove problematic characters */
         s = sname;
         while (s && *s) {
@@ -665,6 +662,26 @@ channel_get_icon ( channel_t *ch )
           s++;
         }
       }
+      else if((send = strstr(chi, "%c"))) {
+        char *aname = intlconv_utf8safestr(intlconv_charset_id("ASCII", 1, 1),
+                                     chname, strlen(chname) * 2);
+
+        if (aname == NULL)
+          aname = strdup(chname);
+
+        sname = url_encode(aname);
+        free((char *)aname);
+      }
+      else {
+        buf[0] = '\0';
+        sname = "";
+      }
+
+      if (send) {
+        *(char *)send = '\0';
+        send += 2;
+      }
+
       snprintf(buf, sizeof(buf), "%s%s%s", chi, sname ?: "", send ?: "");
       if (send)
         free((char *)sname);
@@ -1048,6 +1065,7 @@ channel_tag_save(channel_tag_t *ct)
   idnode_save(&ct->ct_id, c);
   hts_settings_save(c, "channel/tag/%s", idnode_uuid_as_str(&ct->ct_id));
   htsmsg_destroy(c);
+  htsp_tag_update(ct);
 }
 
 
@@ -1162,6 +1180,12 @@ const idclass_t channel_tag_class = {
       .id       = "enabled",
       .name     = "Enabled",
       .off      = offsetof(channel_tag_t, ct_enabled),
+    },
+    {
+      .type     = PT_U32,
+      .id       = "index",
+      .name     = "Sort Index",
+      .off      = offsetof(channel_tag_t, ct_index),
     },
     {
       .type     = PT_STR,

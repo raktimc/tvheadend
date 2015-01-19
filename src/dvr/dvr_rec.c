@@ -134,7 +134,7 @@ dvr_rec_unsubscribe(dvr_entry_t *de, int stopcode)
 static char *
 cleanup_filename(char *s, dvr_config_t *cfg)
 {
-  int i, len = strlen(s);
+  int i, len = strlen(s), len2;
   char *s1;
 
   s1 = intlconv_utf8safestr(cfg->dvr_charset_id, s, len * 2);
@@ -151,7 +151,8 @@ cleanup_filename(char *s, dvr_config_t *cfg)
   if (s[0] == '.')
     s[0] = '_';
 
-  for (i = 0, len = strlen(s); i < len; i++) {
+  len2 = strlen(s);
+  for (i = 0; i < len2; i++) {
 
     if(s[i] == '/')
       s[i] = '-';
@@ -164,6 +165,18 @@ cleanup_filename(char *s, dvr_config_t *cfg)
             ((s[i] < 32) || (s[i] > 122) ||
              (strchr("/:\\<>|*?'\"", s[i]) != NULL)))
       s[i] = '_';
+    else if(cfg->dvr_windows_compatible_filenames &&
+             (strchr("/:\\<>|*?'\"", s[i]) != NULL))
+      s[i] = '_';
+  }
+
+  if(cfg->dvr_windows_compatible_filenames) {
+    // trim trailing spaces and dots
+    for (i = len2 - 1; i >= 0; i--) {
+      if((s[i] != ' ') && (s[i] != '.'))
+        break;
+      s[i] = '\0';
+    }
   }
 
   return s;
@@ -198,39 +211,50 @@ pvr_generate_filename(dvr_entry_t *de, const streaming_start_t *ss)
   if (path[strlen(path)-1] == '/')
     path[strlen(path)-1] = '\0';
 
-  /* Append per-day directory */
-  if (cfg->dvr_dir_per_day) {
-    localtime_r(&de->de_start, &tm);
-    strftime(fullname, sizeof(fullname), "%F", &tm);
-    s = cleanup_filename(fullname, cfg);
+  /* Use the specified directory if set, otherwise construct it from the DVR 
+     configuration */
+  if (de->de_directory) {
+    char *directory = strdup(de->de_directory);
+    s = cleanup_filename(directory, cfg);
     if (s == NULL)
       return -1;
     snprintf(path + strlen(path), sizeof(path) - strlen(path), "/%s", s);
     free(s);
-  }
-
-  /* Append per-channel directory */
-  if (cfg->dvr_channel_dir) {
-    char *chname = strdup(DVR_CH_NAME(de));
-    s = cleanup_filename(chname, cfg);
-    free(chname);
-    if (s == NULL)
+  } else {
+    /* Append per-day directory */
+    if (cfg->dvr_dir_per_day) {
+      localtime_r(&de->de_start, &tm);
+      strftime(fullname, sizeof(fullname), "%F", &tm);
+      s = cleanup_filename(fullname, cfg);
+      if (s == NULL)
       return -1;
-    snprintf(path + strlen(path), sizeof(path) - strlen(path), "/%s", s);
-    free(s);
-  }
+      snprintf(path + strlen(path), sizeof(path) - strlen(path), "/%s", s);
+      free(s);
+    }
 
-  // TODO: per-brand, per-season
-
-  /* Append per-title directory */
-  if (cfg->dvr_title_dir) {
-    char *title = strdup(lang_str_get(de->de_title, NULL));
-    s = cleanup_filename(title, cfg);
-    free(title);
-    if (s == NULL)
+    /* Append per-channel directory */
+    if (cfg->dvr_channel_dir) {
+      char *chname = strdup(DVR_CH_NAME(de));
+      s = cleanup_filename(chname, cfg);
+      free(chname);
+      if (s == NULL)
       return -1;
-    snprintf(path + strlen(path), sizeof(path) - strlen(path), "/%s", s);
-    free(s);
+      snprintf(path + strlen(path), sizeof(path) - strlen(path), "/%s", s);
+      free(s);
+    }
+
+    // TODO: per-brand, per-season
+
+    /* Append per-title directory */
+    if (cfg->dvr_title_dir) {
+      char *title = strdup(lang_str_get(de->de_title, NULL));
+      s = cleanup_filename(title, cfg);
+      free(title);
+      if (s == NULL)
+      return -1;
+      snprintf(path + strlen(path), sizeof(path) - strlen(path), "/%s", s);
+      free(s);
+    }
   }
 
   if (makedirs(path, cfg->dvr_muxcnf.m_directory_permissions) != 0)
@@ -358,7 +382,7 @@ dvr_rec_start(dvr_entry_t *de, const streaming_start_t *ss)
     return -1;
   }
 
-  if(cfg->dvr_tag_files && de->de_bcast) {
+  if(cfg->dvr_tag_files) {
     if(muxer_write_meta(muxer, de->de_bcast, de->de_comment)) {
       dvr_rec_fatal_error(de, "Unable to write meta data");
       return -1;
@@ -576,10 +600,9 @@ dvr_thread(void *aux)
     case SMT_SERVICE_STATUS:
       if(sm->sm_code & TSS_PACKETS) {
 	
-      } else if(sm->sm_code & (TSS_GRACEPERIOD | TSS_ERRORS)) {
+      } else if(sm->sm_code & TSS_ERRORS) {
 
 	int code = SM_CODE_UNDEFINED_ERROR;
-
 
 	if(sm->sm_code & TSS_NO_DESCRAMBLER)
 	  code = SM_CODE_NO_DESCRAMBLER;

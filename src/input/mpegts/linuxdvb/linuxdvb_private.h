@@ -102,7 +102,10 @@ struct linuxdvb_frontend
   int                       lfe_in_setup;
   int                       lfe_locked;
   int                       lfe_status;
+  int                       lfe_status2;
   int                       lfe_ioctls;
+  int                       lfe_nodata;
+  int                       lfe_freq;
   time_t                    lfe_monitor;
   gtimer_t                  lfe_monitor_timer;
   tvhlog_limit_t            lfe_status_log;
@@ -111,7 +114,10 @@ struct linuxdvb_frontend
    * Configuration
    */
   int                       lfe_powersave;
+  int                       lfe_tune_repeats;
   uint32_t                  lfe_skip_bytes;
+  uint32_t                  lfe_ibuf_size;
+  uint32_t                  lfe_status_period;
 
   /*
    * Satconf (DVB-S only)
@@ -136,23 +142,31 @@ struct linuxdvb_satconf
   gtimer_t               ls_diseqc_timer;
   int                    ls_diseqc_idx;
   int                    ls_diseqc_repeats;
+  int                    ls_diseqc_full;
+  int                    ls_switch_rotor;
 
   /*
    * LNB settings
    */
   int                    ls_lnb_poweroff;
   uint32_t               ls_max_rotor_move;
-
-  /*
-   * Position
-   */
-  int                    ls_orbital_pos;
-  char                   ls_orbital_dir;
+  uint32_t               ls_min_rotor_move;
+  double                 ls_site_lat;
+  double                 ls_site_lon;
+  uint32_t               ls_motor_rate;
+  int                    ls_site_lat_south;
+  int                    ls_site_lon_west;
+  int                    ls_site_altitude;
   
   /*
    * Satconf elements
    */
   linuxdvb_satconf_ele_list_t ls_elements;
+  linuxdvb_satconf_ele_t *ls_last_switch;
+  int                    ls_last_vol;
+  int                    ls_last_toneburst;
+  int                    ls_last_tone_off;
+  int                    ls_last_orbital_pos;
 };
 
 /*
@@ -195,7 +209,9 @@ struct linuxdvb_diseqc
   linuxdvb_satconf_ele_t   *ld_satconf;
   int (*ld_grace) (linuxdvb_diseqc_t *ld, dvb_mux_t *lm);
   int (*ld_tune)  (linuxdvb_diseqc_t *ld, dvb_mux_t *lm,
-                   linuxdvb_satconf_ele_t *ls, int fd);
+                   linuxdvb_satconf_t *lsp, linuxdvb_satconf_ele_t *ls, int pol);
+  int (*ld_post)  (linuxdvb_diseqc_t *ld, dvb_mux_t *lm,
+                   linuxdvb_satconf_t *lsp, linuxdvb_satconf_ele_t *ls);
 };
 
 struct linuxdvb_lnb
@@ -249,6 +265,8 @@ void linuxdvb_frontend_delete ( linuxdvb_frontend_t *lfe );
 void linuxdvb_frontend_add_network
   ( linuxdvb_frontend_t *lfe, linuxdvb_network_t *net );
 
+int linuxdvb_frontend_clear
+  ( linuxdvb_frontend_t *lfe );
 int linuxdvb_frontend_tune0
   ( linuxdvb_frontend_t *lfe, mpegts_mux_instance_t *mmi, uint32_t freq );
 int linuxdvb_frontend_tune1
@@ -296,7 +314,7 @@ void linuxdvb_en50494_init (void);
 int
 linuxdvb_diseqc_send
   (int fd, uint8_t framing, uint8_t addr, uint8_t cmd, uint8_t len, ...);
-int linuxdvb_diseqc_set_volt (int fd, int volt);
+int linuxdvb_diseqc_set_volt ( linuxdvb_satconf_t *ls, int volt );
 
 /*
  * Satconf
@@ -326,5 +344,12 @@ void linuxdvb_satconf_post_stop_mux( linuxdvb_satconf_t *ls );
 
 int linuxdvb_satconf_start_mux
   ( linuxdvb_satconf_t *ls, mpegts_mux_instance_t *mmi );
+
+int linuxdvb_satconf_start ( linuxdvb_satconf_t *ls, int delay, int vol );
+
+void linuxdvb_satconf_reset ( linuxdvb_satconf_t *ls );
+
+static inline int linuxdvb_satconf_fe_fd ( linuxdvb_satconf_t *ls )
+  { return ((linuxdvb_frontend_t *)ls->ls_frontend)->lfe_fe_fd; }
 
 #endif /* __TVH_LINUXDVB_PRIVATE_H__ */

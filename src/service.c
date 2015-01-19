@@ -181,9 +181,9 @@ static htsmsg_t *
 service_class_auto_list ( void *o )
 {
   static const struct strtab tab[] = {
-    { "",                   0 },
-    { "No Auto (Disabled)", 1 },
-    { "Missing In PAT",     2 }
+    { "Auto Check Enabled",  0 },
+    { "Auto Check Disabled", 1 },
+    { "Missing In PAT/SDT",  2 }
   };
   return strtab2htsmsg(tab);
 }
@@ -221,6 +221,12 @@ const idclass_t service_class = {
       .list     = service_class_channel_enum,
       .rend     = service_class_channel_rend,
       .opts     = PO_NOSAVE
+    },
+    {
+      .type     = PT_INT,
+      .id       = "priority",
+      .name     = "Priority (0-10)",
+      .off      = offsetof(service_t, s_prio),
     },
     {
       .type     = PT_BOOL,
@@ -1168,7 +1174,7 @@ service_set_streaming_status_flags_(service_t *t, int set)
 
   t->s_streaming_status = set;
 
-  tvhlog(LOG_DEBUG, "service", "%s: Status changed to %s%s%s%s%s%s%s%s",
+  tvhlog(LOG_DEBUG, "service", "%s: Status changed to %s%s%s%s%s%s%s%s%s",
 	 service_nicename(t),
 	 set & TSS_INPUT_HARDWARE ? "[Hardware input] " : "",
 	 set & TSS_INPUT_SERVICE  ? "[Input on service] " : "",
@@ -1176,6 +1182,7 @@ service_set_streaming_status_flags_(service_t *t, int set)
 	 set & TSS_PACKETS        ? "[Reassembled packets] " : "",
 	 set & TSS_NO_DESCRAMBLER ? "[No available descrambler] " : "",
 	 set & TSS_NO_ACCESS      ? "[No access] " : "",
+	 set & TSS_TUNING         ? "[Tuning failed] " : "",
 	 set & TSS_GRACEPERIOD    ? "[Graceperiod expired] " : "",
 	 set & TSS_TIMEOUT        ? "[Data timeout] " : "");
 
@@ -1448,6 +1455,9 @@ service_tss2text(int flags)
   if(flags & TSS_NO_ACCESS)
     return "No access";
 
+  if(flags & TSS_TUNING)
+    return "Tuning failed";
+
   if(flags & TSS_NO_DESCRAMBLER)
     return "No descrambler";
 
@@ -1481,6 +1491,9 @@ tss2errcode(int tss)
 {
   if(tss & TSS_NO_ACCESS)
     return SM_CODE_NO_ACCESS;
+
+  if(tss & TSS_TUNING)
+    return SM_CODE_TUNING_FAILED;
 
   if(tss & TSS_NO_DESCRAMBLER)
     return SM_CODE_NO_DESCRAMBLER;
@@ -1528,6 +1541,8 @@ service_instance_add(service_instance_list_t *sil,
                      const char *source, int prio, int weight)
 {
   service_instance_t *si;
+
+  prio += MAX(0, MIN(10, s->s_prio));
 
   /* Existing */
   TAILQ_FOREACH(si, sil, si_link)

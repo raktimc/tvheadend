@@ -658,6 +658,9 @@ http_dvr_playlist(http_connection_t *hc, dvr_entry_t *de)
   if(http_access_verify(hc, ACCESS_RECORDER))
     return HTTP_STATUS_UNAUTHORIZED;
 
+  if(dvr_entry_verify(de, hc->hc_access, 1))
+    return HTTP_STATUS_NOT_FOUND;
+
   hostpath  = http_get_hostpath(hc);
   durration  = dvr_entry_get_stop_time(de) - dvr_entry_get_start_time(de);
   fsize = dvr_get_filesize(de);
@@ -925,7 +928,7 @@ http_stream_mux(http_connection_t *hc, mpegts_mux_t *mm, int weight)
 
     tcp_get_ip_str((struct sockaddr*)hc->hc_peer, addrbuf, 50);
 
-    s = subscription_create_from_mux(&prch, weight ?: 10, "HTTP",
+    s = subscription_create_from_mux(&prch, NULL, weight ?: 10, "HTTP",
                                      prch.prch_flags |
                                      SUBSCRIPTION_FULLMUX |
                                      SUBSCRIPTION_STREAMING,
@@ -1187,9 +1190,10 @@ page_play(http_connection_t *hc, const char *remain, void *opaque)
     return HTTP_STATUS_NOT_FOUND;
 
   if(hc->hc_access == NULL ||
-     (access_verify2(hc->hc_access, ACCESS_STREAMING) &&
-      access_verify2(hc->hc_access, ACCESS_ADVANCED_STREAMING) &&
-      access_verify2(hc->hc_access, ACCESS_RECORDER)))
+     access_verify2(hc->hc_access, ACCESS_OR |
+                                   ACCESS_STREAMING |
+                                   ACCESS_ADVANCED_STREAMING |
+                                   ACCESS_RECORDER))
     return HTTP_STATUS_UNAUTHORIZED;
 
   playlist = http_arg_get(&hc->hc_req_args, "playlist");
@@ -1210,7 +1214,7 @@ page_play(http_connection_t *hc, const char *remain, void *opaque)
 static int
 page_dvrfile(http_connection_t *hc, const char *remain, void *opaque)
 {
-  int fd, i;
+  int fd, i, ret;
   struct stat st;
   const char *content = NULL, *range;
   dvr_entry_t *de;
@@ -1220,6 +1224,8 @@ page_dvrfile(http_connection_t *hc, const char *remain, void *opaque)
   char disposition[256];
   off_t content_len, chunk;
   intmax_t file_start, file_end;
+  void *tcp_id;
+  th_subscription_t *sub;
 #if defined(PLATFORM_LINUX)
   ssize_t r;
 #elif defined(PLATFORM_FREEBSD) || defined(PLATFORM_DARWIN)
@@ -1230,9 +1236,10 @@ page_dvrfile(http_connection_t *hc, const char *remain, void *opaque)
     return HTTP_STATUS_BAD_REQUEST;
 
   if(hc->hc_access == NULL ||
-     (access_verify2(hc->hc_access, ACCESS_STREAMING) &&
-      access_verify2(hc->hc_access, ACCESS_ADVANCED_STREAMING) &&
-      access_verify2(hc->hc_access, ACCESS_RECORDER)))
+     (access_verify2(hc->hc_access, ACCESS_OR |
+                                    ACCESS_STREAMING |
+                                    ACCESS_ADVANCED_STREAMING |
+                                    ACCESS_RECORDER)))
     return HTTP_STATUS_UNAUTHORIZED;
 
   pthread_mutex_lock(&global_lock);
@@ -1244,8 +1251,12 @@ page_dvrfile(http_connection_t *hc, const char *remain, void *opaque)
     pthread_mutex_unlock(&global_lock);
     return HTTP_STATUS_NOT_FOUND;
   }
+  if(dvr_entry_verify(de, hc->hc_access, 1)) {
+    pthread_mutex_unlock(&global_lock);
+    return HTTP_STATUS_NOT_FOUND;
+  }
 
-  fname = strdup(de->de_filename);
+  fname = tvh_strdupa(de->de_filename);
   content = muxer_container_type2mime(de->de_mc, 1);
 
   pthread_mutex_unlock(&global_lock);
@@ -1265,7 +1276,6 @@ page_dvrfile(http_connection_t *hc, const char *remain, void *opaque)
   }
 
   fd = tvh_open(fname, O_RDONLY, 0);
-  free(fname);
   if(fd < 0)
     return HTTP_STATUS_NOT_FOUND;
 
@@ -1307,14 +1317,40 @@ page_dvrfile(http_connection_t *hc, const char *remain, void *opaque)
       return HTTP_STATUS_INTERNAL;
     }
 
+  pthread_mutex_lock(&global_lock);
+  tcp_id = http_stream_preop(hc);
+  tcp_get_ip_str((struct sockaddr*)hc->hc_peer, range_buf, 50);
+  sub = NULL;
+  if (tcp_id && !hc->hc_no_output && content_len > 64*1024) {
+    sub = subscription_create(NULL, 1, "HTTP",
+                              SUBSCRIPTION_NONE, NULL,
+                              range_buf, hc->hc_username,
+                              http_arg_get(&hc->hc_args, "User-Agent"));
+    if (sub == NULL) {
+      http_stream_postop(tcp_id);
+      tcp_id = NULL;
+    } else {
+      basename = malloc(strlen(fname) + 7 + 1);
+      strcpy(basename, "file://");
+      strcat(basename, fname);
+      sub->ths_dvrfile = basename;
+    }
+  }
+  pthread_mutex_unlock(&global_lock);
+  if (tcp_id == NULL) {
+    close(fd);
+    return HTTP_STATUS_NOT_ALLOWED;
+  }
+
   http_send_header(hc, range ? HTTP_STATUS_PARTIAL_CONTENT : HTTP_STATUS_OK,
        content, content_len, NULL, NULL, 10, 
        range ? range_buf : NULL,
        disposition[0] ? disposition : NULL);
 
+  ret = 0;
   if(!hc->hc_no_output) {
     while(content_len > 0) {
-      chunk = MIN(1024 * 1024 * 1024, content_len);
+      chunk = MIN(1024 * (sub ? 128 : 1024 * 1024), content_len);
 #if defined(PLATFORM_LINUX)
       r = sendfile(hc->hc_fd, fd, NULL, chunk);
 #elif defined(PLATFORM_FREEBSD)
@@ -1324,14 +1360,24 @@ page_dvrfile(http_connection_t *hc, const char *remain, void *opaque)
       sendfile(fd, hc->hc_fd, 0, NULL, &r, 0);
 #endif
       if(r < 0) {
-        close(fd);
-        return -1;
+        ret = -1;
+        break;
       }
       content_len -= r;
+      if (sub) {
+        sub->ths_bytes_in += r;
+        sub->ths_bytes_out += r;
+      }
     }
   }
   close(fd);
-  return 0;
+
+  pthread_mutex_lock(&global_lock);
+  if (sub)
+    subscription_unsubscribe(sub);
+  http_stream_postop(tcp_id);
+  pthread_mutex_unlock(&global_lock);
+  return ret;
 }
 
 /**
@@ -1358,6 +1404,7 @@ page_imagecache(http_connection_t *hc, const char *remain, void *opaque)
                                     ACCESS_STREAMING |
                                     ACCESS_ADVANCED_STREAMING |
                                     ACCESS_HTSP_STREAMING |
+                                    ACCESS_HTSP_RECORDER |
                                     ACCESS_RECORDER)))
     return HTTP_STATUS_UNAUTHORIZED;
 

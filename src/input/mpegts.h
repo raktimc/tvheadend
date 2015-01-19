@@ -298,6 +298,8 @@ struct mpegts_network
   char    *mn_charset;
   int      mn_idlescan;
   int      mn_ignore_chnum;
+  int      mn_sid_chnum;
+  int      mn_localtime;
 };
 
 typedef enum mpegts_mux_scan_state
@@ -412,7 +414,7 @@ struct mpegts_mux
   void (*mm_config_save)      (mpegts_mux_t *mm);
   void (*mm_display_name)     (mpegts_mux_t*, char *buf, size_t len);
   int  (*mm_is_enabled)       (mpegts_mux_t *mm);
-  int  (*mm_start)            (mpegts_mux_t *mm, const char *r, int w, int flags);
+  int  (*mm_start)            (mpegts_mux_t *mm, mpegts_input_t *mi, const char *r, int w, int flags);
   void (*mm_stop)             (mpegts_mux_t *mm, int force);
   void (*mm_open_table)       (mpegts_mux_t*,mpegts_table_t*,int subscribe);
   void (*mm_close_table)      (mpegts_mux_t*,mpegts_table_t*);
@@ -563,6 +565,8 @@ struct mpegts_input
   int mi_initscan;
   int mi_idlescan;
 
+  char *mi_linked;
+
   LIST_ENTRY(mpegts_input) mi_global_link;
 
   mpegts_network_link_list_t mi_networks;
@@ -631,6 +635,7 @@ struct mpegts_input
   void (*mi_stopping_mux)   (mpegts_input_t*,mpegts_mux_instance_t*);
   void (*mi_stopped_mux)    (mpegts_input_t*,mpegts_mux_instance_t*);
   int  (*mi_has_subscription) (mpegts_input_t*, mpegts_mux_t *mm);
+  void (*mi_tuning_error)   (mpegts_input_t*,mpegts_mux_t *);
   idnode_set_t *(*mi_network_list) (mpegts_input_t*);
 };
 
@@ -724,6 +729,7 @@ void mpegts_network_delete ( mpegts_network_t *mn, int delconf );
 
 int mpegts_network_set_nid          ( mpegts_network_t *mn, uint16_t nid );
 int mpegts_network_set_network_name ( mpegts_network_t *mn, const char *name );
+void mpegts_network_scan ( mpegts_network_t *mn );
 
 mpegts_mux_t *mpegts_mux_create0
   ( mpegts_mux_t *mm, const idclass_t *class, const char *uuid,
@@ -747,6 +753,8 @@ static inline mpegts_mux_t *mpegts_mux_find(const char *uuid)
 void mpegts_mux_delete ( mpegts_mux_t *mm, int delconf );
 
 void mpegts_mux_save ( mpegts_mux_t *mm, htsmsg_t *c );
+
+void mpegts_mux_tuning_error( mpegts_mux_t *mm );
 
 mpegts_mux_instance_t *mpegts_mux_instance_create0
   ( mpegts_mux_instance_t *mmi, const idclass_t *class, const char *uuid,
@@ -774,8 +782,11 @@ void mpegts_mux_open_table ( mpegts_mux_t *mm, mpegts_table_t *mt, int subscribe
 void mpegts_mux_close_table ( mpegts_mux_t *mm, mpegts_table_t *mt );
 
 void mpegts_mux_remove_subscriber(mpegts_mux_t *mm, th_subscription_t *s, int reason);
-int  mpegts_mux_subscribe(mpegts_mux_t *mm, const char *name, int weight, int flags);
+int  mpegts_mux_subscribe(mpegts_mux_t *mm, mpegts_input_t *mi,
+                          const char *name, int weight, int flags);
 void mpegts_mux_unsubscribe_by_name(mpegts_mux_t *mm, const char *name);
+
+void mpegts_mux_unsubscribe_linked(mpegts_input_t *mi);
 
 void mpegts_mux_scan_done ( mpegts_mux_t *mm, const char *buf, int res );
 
@@ -823,9 +834,9 @@ static inline void
 tsdebug_write(mpegts_mux_t *mm, uint8_t *buf, size_t len)
 {
 #if ENABLE_TSDEBUG
-  ssize_t r = write(mm->mm_tsdebug_fd2, buf, len);
-  if (r != len && mm->mm_tsdebug_fd2 >= 0)
-    tvherror("tsdebug", "unable to write input data (%i)", errno);
+  if (mm->mm_tsdebug_fd2 >= 0)
+    if (write(mm->mm_tsdebug_fd2, buf, len) != len)
+      tvherror("tsdebug", "unable to write input data (%i)", errno);
 #endif
 }
 
@@ -921,6 +932,15 @@ LIST_HEAD(,mpegts_listener) mpegts_listeners;
   LIST_FOREACH(ml, &mpegts_listeners, ml_link)\
     if (ml->op) ml->op(t, ml->ml_opaque);\
 } (void)0
+
+/*
+ * Misc
+ */
+#if ENABLE_LINUXDVB
+void linuxdvb_filter_close ( int fd );
+#else
+static inline void linuxdvb_filter_close ( int fd ) { assert(0); };
+#endif
 
 #endif /* __TVH_MPEGTS_H__ */
 

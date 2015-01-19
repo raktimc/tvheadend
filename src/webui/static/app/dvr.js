@@ -25,15 +25,23 @@ tvheadend.dvrDetails = function(uuid) {
         if (chicon != null && chicon.length > 0)
             content += '<img class="x-epg-chicon" src="' + chicon + '">';
 
-        content += '<div class="x-epg-title">' + title + '</div>';
-        content += '<div class="x-epg-title">' + episode + '</div>';
-        content += '<div class="x-epg-time"><div class="x-epg-prefix">Scheduled Start Time:</div> ' + tvheadend.niceDate(start_real * 1000) + '</div>';
-        content += '<div class="x-epg-time"><div class="x-epg-prefix">Scheduled Stop Time:</div> ' + tvheadend.niceDate(stop_real * 1000) + '</div>';
-        content += '<div class="x-epg-time"><div class="x-epg-prefix">Duration:</div> ' + parseInt(duration / 60) + ' min</div>';
-        content += '<div class="x-epg-desc">' + desc + '</div>';
+        if (title)
+          content += '<div class="x-epg-title">' + title + '</div>';
+        if (episode)
+          content += '<div class="x-epg-title">' + episode + '</div>';
+        if (start_real)
+          content += '<div class="x-epg-time"><div class="x-epg-prefix">Scheduled Start Time:</div> ' + tvheadend.niceDate(start_real * 1000) + '</div>';
+        if (stop_real)
+          content += '<div class="x-epg-time"><div class="x-epg-prefix">Scheduled Stop Time:</div> ' + tvheadend.niceDate(stop_real * 1000) + '</div>';
+        if (duration)
+          content += '<div class="x-epg-time"><div class="x-epg-prefix">Duration:</div> ' + parseInt(duration / 60) + ' min</div>';
+        if (desc)
+          content += '<div class="x-epg-desc">' + desc + '</div>';
         content += '<hr>';
-        content += '<div class="x-epg-meta"><div class="x-epg-prefix">Status:</div> ' + status + '</div>';
-        content += '<div class="x-epg-meta"><div class="x-epg-prefix">File size:</div> ' + parseInt(filesize / 1000000) + ' MB</div>';
+        if (status)
+          content += '<div class="x-epg-meta"><div class="x-epg-prefix">Status:</div> ' + status + '</div>';
+        if (filesize)
+          content += '<div class="x-epg-meta"><div class="x-epg-prefix">File size:</div> ' + parseInt(filesize / 1000000) + ' MB</div>';
         if (comment)
           content += '<div class="x-epg-meta"><div class="x-epg-prefix">Comment:</div> ' + comment + '</div>';
 
@@ -207,7 +215,7 @@ tvheadend.dvr_upcoming = function(panel, index) {
         },
         del: true,
         list: 'disp_title,episode,pri,start_real,stop_real,' +
-              'duration,channelname,creator,config_name,' +
+              'duration,channelname,owner,creator,config_name,' +
               'sched_status,comment',
         sort: {
           field: 'start_real',
@@ -270,7 +278,7 @@ tvheadend.dvr_finished = function(panel, index) {
         delquestion: 'Do you really want to delete the selected recordings?<br/><br/>' +
                      'The associated file will be removed from the storage.',
         list: 'disp_title,episode,start_real,stop_real,' +
-              'duration,filesize,channelname,creator,' +
+              'duration,filesize,channelname,owner,creator,' +
               'sched_status,url,comment',
         columns: {
             filesize: {
@@ -350,7 +358,7 @@ tvheadend.dvr_failed = function(panel, index) {
         delquestion: 'Do you really want to delete the selected recordings?<br/><br/>' +
                      'The associated file will be removed from the storage.',
         list: 'disp_title,episode,start_real,stop_real,' +
-              'duration,filesize,channelname,creator,' +
+              'duration,filesize,channelname,owner,creator,' +
               'status,sched_status,url,comment',
         columns: {
             filesize: {
@@ -426,35 +434,41 @@ tvheadend.autorec_editor = function(panel, index) {
         columns: {
             enabled:      { width: 50 },
             name:         { width: 200 },
+            directory:    { width: 200 },
             title:        { width: 300 },
+            fulltext:     { width: 70 },
             channel:      { width: 200 },
             tag:          { width: 200 },
             content_type: { width: 100 },
-            minduration:  { width: 80 },
-            maxduration:  { width: 80 },
+            minduration:  { width: 100 },
+            maxduration:  { width: 100 },
             weekdays:     { width: 160 },
-            start:        { width: 100 },
+            start:        { width: 80 },
+            start_window: { width: 80 },
+            start_extra:  { width: 80 },
+            stop_extra:   { width: 80 },
+            weekdays: {
+                width: 120,
+                renderer: function(st) { return tvheadend.weekdaysRenderer(st); }
+            },
             pri:          { width: 80 },
+            retention:    { width: 80 },
             config_name:  { width: 120 },
+            owner:        { width: 100 },
             creator:      { width: 200 },
             comment:      { width: 200 }
         },
         add: {
             url: 'api/dvr/autorec',
             params: {
-               list: 'enabled,name,title,channel,tag,content_type,minduration,' +
-                     'maxduration,weekdays,start,pri,config_name,comment'
+               list: 'enabled,name,directory,title,fulltext,channel,tag,content_type,minduration,' +
+                     'maxduration,weekdays,start,start_window,pri,config_name,comment'
             },
             create: { }
         },
         del: true,
-        list: 'enabled,name,title,channel,tag,content_type,minduration,' +
-              'maxduration,weekdays,start,pri,config_name,creator,comment',
-        columns: {
-            weekdays: {
-                renderer: function(st) { return tvheadend.weekdaysRenderer(st); }
-            }
-        },
+        list: 'enabled,name,directory,title,fulltext,channel,tag,content_type,minduration,' +
+              'maxduration,weekdays,start,start_window,pri,config_name,owner,creator,comment',
         sort: {
           field: 'name',
           direction: 'ASC'
@@ -482,30 +496,30 @@ tvheadend.timerec_editor = function(panel, index) {
         columns: {
             enabled:      { width: 50 },
             name:         { width: 200 },
+            directory:    { width: 200 },
             title:        { width: 300 },
             channel:      { width: 200 },
-            weekdays:     { width: 160 },
-            start:        { width: 100 },
-            stop:         { width: 100 },
+            weekdays: {
+                width: 120,
+                renderer: function(st) { return tvheadend.weekdaysRenderer(st); }
+            },
+            start:        { width: 120 },
+            stop:         { width: 120 },
             pri:          { width: 80 },
             config_name:  { width: 120 },
+            owner:        { width: 100 },
             creator:      { width: 200 },
             comment:      { width: 200 }
         },
         add: {
             url: 'api/dvr/timerec',
             params: {
-               list: 'enabled,name,title,channel,weekdays,start,stop,pri,config_name,comment'
+               list: 'enabled,name,directory,title,channel,weekdays,start,stop,pri,config_name,comment'
             },
             create: { }
         },
         del: true,
-        list: 'enabled,name,title,channel,weekdays,start,stop,pri,config_name,comment',
-        columns: {
-            weekdays: {
-                renderer: function(st) { return tvheadend.weekdaysRenderer(st); }
-            }
-        },
+        list: 'enabled,name,directory,title,channel,weekdays,start,stop,pri,config_name,owner,creator,comment',
         sort: {
           field: 'name',
           direction: 'ASC'

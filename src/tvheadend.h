@@ -420,7 +420,7 @@ typedef enum {
 #define SM_CODE_BAD_SIGNAL                205
 #define SM_CODE_NO_SOURCE                 206
 #define SM_CODE_NO_SERVICE                207
-#define SM_CODE_NO_VALID_ADAPTER          308
+#define SM_CODE_NO_VALID_ADAPTER          208
 
 #define SM_CODE_ABORTED                   300
 
@@ -710,6 +710,10 @@ int makedirs ( const char *path, int mode );
 int rmtree ( const char *path );
 
 char *regexp_escape ( const char *str );
+
+/* URL decoding */
+char to_hex(char code);
+char *url_encode(char *str);
 
 static inline int32_t deltaI32(int32_t a, int32_t b) { return (a > b) ? (a - b) : (b - a); }
 static inline uint32_t deltaU32(uint32_t a, uint32_t b) { return (a > b) ? (a - b) : (b - a); }

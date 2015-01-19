@@ -60,16 +60,44 @@
     <dt>Update tolerance (milliseconds)</dt>
     <dd>Only update the system clock (doesn't affect NTP driver) if the delta
     between the system clock and DVB time is greater than this. This can help
-    stop horrible oscillations on the system clock.</dd>
+    stop excessive oscillations on the system clock.</dd>
 
+   <br><br>
+   <hr>
+   <b>Picon</b>
+   <hr>
+
+   <dd>Picons (from p ersonal icons) are collections of similar icons that can be automatically
+   matched against your channels based on a number of technical parameters that will uniquely 
+   define a channel. The use of these parameters (e.g. mux, frequency, orbital position) 
+   removes the ambiguity of using names - it's not case sensitive, it doesn't care if there 
+   are spaces or not, and so on.
+
+   You can generate picons yourself from existing images, or you can usually find sets 
+   pre-made on the Internet if you search for them. They're a good way to get large numbers 
+   of icons matched quickly, and usually in a similar style (such as square, x * y pixels, with 
+   a consistent highlight/reflection effect).</dd>
+
+   <dl>
+    <dt>Prefer picons over channel name:</dt>
+    <dd>If both a picon and a channel-specific (e.g. channelname.jpg) icon are defined, use the picon.</dd>
+ 
+    <dt>Channel icon path</dt>
+    <dd>Path to an icon for this channel. This can be named however you wish, as a local (file://) or remote (http://) image. 
+        The following placeholders are available:<br>
+	<ul>
+		<li>%C - the transliterated channel name in ASCII (safe characters, no spaces etc.)</li>
+		<li>%c - the channel name (URL encoded ASCII)</li>
+	</ul>
+	Example: file:///tmp/icons/%C.png or http://example.com/%c.png</dd>
+  
+    <dt>Picon path</dt>
+    <dd>Path to a directory (folder) containing your picon collection. This can be named however 
+    you wish, as a local (file://) or remote (http://) location - however, remember that it's pointing 
+    to a directory as the picon names are automatically generated from the service parameters 
+    frequency, orbital position, etc.).<br>
+    Example: file:///home/hts/picons</dd>
   </dl>
-
-  <br><br>
-  <hr>
-  <b>Transcoding</b>
-  <hr>
-
-  <dd>If enabled at build time (src/plumbing/transcoding.c), this allows you to switch transcoding support on and off.</dd>
   
   <br><br>
   <hr>

@@ -32,6 +32,7 @@
 #include "settings.h"
 #include "dvr.h"
 #include "epg.h"
+#include "htsp_server.h"
 
 struct dvr_timerec_entry_queue timerec_entries;
 
@@ -132,7 +133,7 @@ dvr_timerec_check(dvr_timerec_entry_t *dte)
   /* day boundary correction */
   if (start > stop)
     stop += 24 * 60 * 60;
-  assert(start < stop);
+  assert(start <= stop);
 
   if(dte->dte_weekdays != 0x7f) {
     localtime_r(&start, &tm_start);
@@ -155,7 +156,7 @@ dvr_timerec_check(dvr_timerec_entry_t *dte)
   de = dvr_entry_create_(idnode_uuid_as_str(&dte->dte_config->dvr_id),
                          NULL, dte->dte_channel,
                          start, stop, 0, 0, title,
-                         NULL, NULL, NULL, buf,
+                         NULL, NULL, NULL, dte->dte_owner, buf,
                          NULL, dte, dte->dte_pri, dte->dte_retention,
                          dte->dte_comment);
 
@@ -194,6 +195,53 @@ dvr_timerec_create(const char *uuid, htsmsg_t *conf)
 
   idnode_load(&dte->dte_id, conf);
 
+  htsp_timerec_entry_add(dte);
+
+  return dte;
+}
+
+dvr_timerec_entry_t*
+dvr_timerec_create_htsp(const char *dvr_config_name, const char *title,
+                            channel_t *ch, uint32_t enabled, uint32_t start, uint32_t stop,
+                            uint32_t weekdays, dvr_prio_t pri, int retention,
+                            const char *owner, const char *creator, const char *comment, 
+                            const char *name, const char *directory)
+{
+  dvr_timerec_entry_t *dte;
+  htsmsg_t *conf, *days;
+
+  conf = htsmsg_create_map();
+  days = htsmsg_create_list();
+
+  htsmsg_add_u32(conf, "enabled",     enabled > 0 ? 1 : 0);
+  htsmsg_add_u32(conf, "retention",   retention);
+  htsmsg_add_u32(conf, "pri",         pri);
+  htsmsg_add_str(conf, "title",       title);
+  htsmsg_add_str(conf, "config_name", dvr_config_name ?: "");
+  htsmsg_add_str(conf, "owner",       owner ?: "");
+  htsmsg_add_str(conf, "creator",     creator ?: "");
+  htsmsg_add_str(conf, "comment",     comment ?: "");
+  htsmsg_add_str(conf, "name",        name ?: "");
+  htsmsg_add_str(conf, "directory",   directory ?: "");
+  htsmsg_add_u32(conf, "start",       start);
+  htsmsg_add_u32(conf, "stop",        stop);
+
+  if (ch)
+    htsmsg_add_str(conf, "channel", idnode_uuid_as_str(&ch->ch_id));
+
+  int i;
+  for (i = 0; i < 7; i++)
+    if (weekdays & (1 << i))
+      htsmsg_add_u32(days, NULL, i + 1);
+
+  htsmsg_add_msg(conf, "weekdays", days);
+
+  dte = dvr_timerec_create(NULL, conf);
+  htsmsg_destroy(conf);
+
+  if (dte)
+    dvr_timerec_save(dte);
+
   return dte;
 }
 
@@ -208,6 +256,8 @@ timerec_entry_destroy(dvr_timerec_entry_t *dte, int delconf)
   if (delconf)
     hts_settings_remove("dvr/timerec/%s", idnode_uuid_as_str(&dte->dte_id));
 
+  htsp_timerec_entry_delete(dte);
+
   TAILQ_REMOVE(&timerec_entries, dte, dte_link);
   idnode_unlink(&dte->dte_id);
 
@@ -216,6 +266,7 @@ timerec_entry_destroy(dvr_timerec_entry_t *dte, int delconf)
 
   free(dte->dte_name);
   free(dte->dte_title);
+  free(dte->dte_owner);
   free(dte->dte_creator);
   free(dte->dte_comment);
 
@@ -250,12 +301,27 @@ dvr_timerec_entry_class_save(idnode_t *self)
   dvr_timerec_entry_t *dte = (dvr_timerec_entry_t *)self;
   dvr_timerec_save(dte);
   dvr_timerec_check(dte);
+  htsp_timerec_entry_update(dte);
 }
 
 static void
 dvr_timerec_entry_class_delete(idnode_t *self)
 {
   timerec_entry_destroy((dvr_timerec_entry_t *)self, 1);
+}
+
+static int
+dvr_timerec_entry_class_perm(idnode_t *self, access_t *a, htsmsg_t *msg_to_write)
+{
+  dvr_timerec_entry_t *dte = (dvr_timerec_entry_t *)self;
+
+  if (access_verify2(a, ACCESS_OR|ACCESS_ADMIN|ACCESS_RECORDER))
+    return -1;
+  if (!access_verify2(a, ACCESS_ADMIN))
+    return 0;
+  if (dvr_timerec_entry_verify(dte, a))
+    return -1;
+  return 0;
 }
 
 static const char *
@@ -469,6 +535,7 @@ const idclass_t dvr_timerec_entry_class = {
   .ic_save       = dvr_timerec_entry_class_save,
   .ic_get_title  = dvr_timerec_entry_class_get_title,
   .ic_delete     = dvr_timerec_entry_class_delete,
+  .ic_perm       = dvr_timerec_entry_class_perm,
   .ic_properties = (const property_t[]) {
     {
       .type     = PT_BOOL,
@@ -488,6 +555,12 @@ const idclass_t dvr_timerec_entry_class = {
       .name     = "Title",
       .off      = offsetof(dvr_timerec_entry_t, dte_title),
       .def.s    = "Time-%x-%R",
+    },
+    {
+      .type     = PT_STR,
+      .id       = "directory",
+      .name     = "Directory",
+      .off      = offsetof(dvr_timerec_entry_t, dte_directory),
     },
     {
       .type     = PT_STR,
@@ -555,6 +628,13 @@ const idclass_t dvr_timerec_entry_class = {
     },
     {
       .type     = PT_STR,
+      .id       = "owner",
+      .name     = "Owner",
+      .off      = offsetof(dvr_timerec_entry_t, dte_creator),
+      .opts     = PO_RDONLY,
+    },
+    {
+      .type     = PT_STR,
       .id       = "creator",
       .name     = "Creator",
       .off      = offsetof(dvr_timerec_entry_t, dte_creator),
@@ -609,8 +689,9 @@ dvr_timerec_timer_cb(void *aux)
   tvhtrace("dvr", "timerec update");
 
   /* check all entries */
-  TAILQ_FOREACH(dte, &timerec_entries, dte_link)
+  TAILQ_FOREACH(dte, &timerec_entries, dte_link) {
     dvr_timerec_check(dte);
+  }
 
   /* load the timer */
   gtimer_arm(&dvr_timerec_timer, dvr_timerec_timer_cb, NULL, 3550);

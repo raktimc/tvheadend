@@ -96,6 +96,8 @@ typedef struct video_stream {
 
   int16_t                    vid_width;
   int16_t                    vid_height;
+
+  int                        vid_first_sent;
 } video_stream_t;
 
 
@@ -329,10 +331,10 @@ create_adts_header(pktbuf_t *pb, int sri, int channels)
    init_wbits(&bs, pktbuf_ptr(pb), 56);
 
    put_bits(&bs, 0xfff, 12); // Sync marker
-   put_bits(&bs, 0, 1);      // ID 0 = MPEG 4
+   put_bits(&bs, 1, 1);      // ID 0 = MPEG 4, 1 = MPEG 2
    put_bits(&bs, 0, 2);      // Layer
    put_bits(&bs, 1, 1);      // Protection absent
-   put_bits(&bs, 2, 2);      // AOT
+   put_bits(&bs, 2, 2);      // AOT, 2 = AAC LC (for MPEG 2 bit)
    put_bits(&bs, sri, 4);
    put_bits(&bs, 1, 1);      // Private bit
    put_bits(&bs, channels, 3);
@@ -540,13 +542,16 @@ transcoder_stream_audio(transcoder_t *t, transcoder_stream_t *ts, th_pkt_t *pkt)
       }
     }
 
+    // User specified streaming profile audio bitrate limiter.
+    if (t->t_props.tp_abitrate >= 16) {
+      octx->bit_rate       = t->t_props.tp_abitrate * 1000;
+    }
+
     switch (ts->ts_type) {
     case SCT_MPEG2AUDIO:
-      octx->bit_rate       = 128000;
       break;
 
     case SCT_AAC:
-      octx->bit_rate       = 128000;
       octx->flags         |= CODEC_FLAG_BITEXACT;
       break;
 
@@ -756,7 +761,7 @@ scleanup:
       n->pkt_duration       = packet.duration;
 
       if (extra_size && ts->ts_type == SCT_AAC)
-        create_adts_header(pkt->pkt_payload, n->pkt_sri, octx->channels);
+        create_adts_header(n->pkt_payload, n->pkt_sri, octx->channels);
 
       if (octx->extradata_size)
 	n->pkt_meta = pktbuf_alloc(octx->extradata, octx->extradata_size);
@@ -941,6 +946,8 @@ transcoder_stream_video(transcoder_t *t, transcoder_stream_t *ts, th_pkt_t *pkt)
   uint8_t *buf, *deint;
   int length, len, ret, got_picture, got_output, got_ref;
   video_stream_t *vs = (video_stream_t*)ts;
+  streaming_message_t *sm;
+  th_pkt_t *pkt2;
 
   av_init_packet(&packet);
   av_init_packet(&packet2);
@@ -967,6 +974,17 @@ transcoder_stream_video(transcoder_t *t, transcoder_stream_t *ts, th_pkt_t *pkt)
       transcoder_stream_invalidate(ts);
       goto cleanup;
     }
+  }
+
+  if (!vs->vid_first_sent) {
+    /* notify global headers that we're live */
+    /* the video packets might be delayed */
+    pkt2 = pkt_alloc(NULL, 0, pkt->pkt_pts, pkt->pkt_dts);
+    pkt2->pkt_componentindex = pkt->pkt_componentindex;
+    sm = streaming_msg_create_pkt(pkt2);
+    streaming_target_deliver2(ts->ts_target, sm);
+    pkt_ref_dec(pkt);
+    vs->vid_first_sent = 1;
   }
 
   packet.data     = pktbuf_ptr(pkt->pkt_payload);
@@ -1019,26 +1037,58 @@ transcoder_stream_video(transcoder_t *t, transcoder_stream_t *ts, th_pkt_t *pkt)
       octx->pix_fmt        = PIX_FMT_YUV420P;
       octx->flags         |= CODEC_FLAG_GLOBAL_HEADER;
 
+      // Default settings for quantizer. Best quality unless changed by the streaming profile.
       octx->qmin           = 1;
       octx->qmax           = FF_LAMBDA_MAX;
 
-      octx->bit_rate       = 2 * octx->width * octx->height;
-      octx->rc_max_rate    = 4 * octx->bit_rate;
-      octx->rc_buffer_size = 2 * octx->rc_max_rate;
+      if (t->t_props.tp_vbitrate == 0) { // "Auto"
+        octx->bit_rate       = 2 * octx->width * octx->height;
+        octx->rc_max_rate    = 4 * octx->bit_rate;
+      }
+
+      if (t->t_props.tp_vbitrate > 0 && t->t_props.tp_vbitrate < 64) { // CRF
+        octx->qmin           = t->t_props.tp_vbitrate;
+      }
+
+      if (t->t_props.tp_vbitrate >= 64) { // CBR
+        octx->rc_max_rate    = t->t_props.tp_vbitrate * 1000;
+        octx->bit_rate       = ceil(octx->rc_max_rate / 1.15);
+      }
+
+      if (octx->rc_max_rate > 0)
+        octx->rc_buffer_size = 2 * octx->rc_max_rate;
+
       break;
- 
+
     case SCT_VP8:
       octx->codec_id       = AV_CODEC_ID_VP8;
       octx->pix_fmt        = PIX_FMT_YUV420P;
 
-      octx->qmin = 10;
-      octx->qmax = 20;
+      av_dict_set(&opts, "quality", "realtime", 0);
 
-      av_dict_set(&opts, "quality",  "realtime", 0);
+      octx->qcompress      = 0.6;
 
-      octx->bit_rate       = 3 * octx->width * octx->height;
-      octx->rc_buffer_size = 8 * 1024 * 224;
-      octx->rc_max_rate    = 2 * octx->bit_rate;
+      if (t->t_props.tp_vbitrate == 0) {
+        octx->qmin = 10;
+        octx->qmax = 20;
+        octx->rc_max_rate = 6 * octx->width * octx->height;
+      }
+
+      // Stream profile vbitrate 1-63 is used for user specified qmin quantizer (CRF mode).
+      if (t->t_props.tp_vbitrate > 0 && t->t_props.tp_vbitrate < 64) {
+        octx->qmin = t->t_props.tp_vbitrate;
+        octx->qmax = octx->qmin + 30 <= 63 ? octx->qmin + 30 : 63;
+        octx->rc_max_rate = 16 * octx->width * octx->height;
+       }
+
+      if (t->t_props.tp_vbitrate >= 64) { // CBR mode.
+        octx->rc_max_rate    = t->t_props.tp_vbitrate * 1000;
+        octx->bit_rate       = ceil(octx->rc_max_rate / 1.15);
+      }
+
+      if (octx->rc_max_rate > 0)
+        octx->rc_buffer_size = 8 * 1024 * 224;
+
       break;
 
     case SCT_H264:
@@ -1055,20 +1105,37 @@ transcoder_stream_video(transcoder_t *t, transcoder_stream_t *ts, th_pkt_t *pkt)
       // Recommended default: -qcomp 0.60
       octx->qcompress = 0.6;
 
-      // Minimum quantizer. Doesn't need to be changed.
-      // Recommended default: -qmin 10
-      octx->qmin = 10;
+      // Default = "medium". We gain more encoding speed compared to the loss of quality when lowering it _slightly_.
+      av_dict_set(&opts, "preset",  "faster", 0);
+      // Use main profile instead of the standard "baseline", we are aiming for better quality.
+      // Older devices (iPhone <4, Android <4) only supports baseline. Chromecast only supports >=4.1...
+      av_dict_set(&opts, "profile", "main", 0); // L3.0
+      av_dict_set(&opts, "tune",    "zerolatency", 0);
 
-      // Maximum quantizer. Doesn't need to be changed.
-      // Recommended default: -qmax 51
-      octx->qmax = 30;
+      // If we are encoding HD, upgrade the profile to high.
+      if (octx->height >= 720 && t->t_props.tp_resolution >= 720) {
+        av_dict_set(&opts, "profile", "high", 0); // L3.1
+      }
 
-      av_dict_set(&opts, "preset",  "medium", 0);
-      av_dict_set(&opts, "profile", "baseline", 0);
+      // Default "auto" CRF settings. Aimed for quality without being too agressive.
+      if (t->t_props.tp_vbitrate == 0) {
+        octx->qmin = 10;
+        octx->qmax = 30;
+      }
 
-      octx->bit_rate       = 2 * octx->width * octx->height;
-      octx->rc_buffer_size = 8 * 1024 * 224;
-      octx->rc_max_rate    = 2 * octx->rc_buffer_size;
+      // Stream profile vbitrate 1-63 is used for user specified qmin quantizer (CRF mode).
+      if (t->t_props.tp_vbitrate > 0 && t->t_props.tp_vbitrate < 64) {
+        octx->qmin = t->t_props.tp_vbitrate; // qmax = 51 in all default profiles, let's stick with it for now.
+      }
+
+      if (t->t_props.tp_vbitrate >= 64) { // Bitrate limited encoding (CBR mode).
+        octx->rc_max_rate    = t->t_props.tp_vbitrate * 1000;
+        octx->bit_rate       = ceil(octx->rc_max_rate / 1.15);
+      }
+
+      if (octx->rc_max_rate > 0)
+        octx->rc_buffer_size = 8 * 1024 * 224;
+
       break;
 
     default:
@@ -1374,8 +1441,10 @@ transcoder_init_audio(transcoder_t *t, streaming_start_component_t *ssc)
 
   sct = codec_id2streaming_component_type(ocodec->id);
 
-  if (sct == ssc->ssc_type)
+  // Don't transcode to identical output codec unless the streaming profile specifies a bitrate limiter.
+  if (sct == ssc->ssc_type && t->t_props.tp_abitrate < 16) {
     return transcoder_init_stream(t, ssc);
+  }
 
   as = calloc(1, sizeof(audio_stream_t));
 
@@ -1733,7 +1802,8 @@ transcoder_set_properties(streaming_target_t *st,
   strncpy(tp->tp_acodec, props->tp_acodec, sizeof(tp->tp_acodec)-1);
   strncpy(tp->tp_scodec, props->tp_scodec, sizeof(tp->tp_scodec)-1);
   tp->tp_channels   = props->tp_channels;
-  tp->tp_bandwidth  = props->tp_bandwidth;
+  tp->tp_vbitrate   = props->tp_vbitrate;
+  tp->tp_abitrate   = props->tp_abitrate;
   tp->tp_resolution = props->tp_resolution;
 
   memcpy(tp->tp_language, props->tp_language, 4);
