@@ -26,6 +26,7 @@ optParser = OptionParser()
 optParser.add_option('--host',  type='string', default='localhost', help='tvheadend web admin address, default: localhost')
 optParser.add_option('--port',  type='int', default=9981, help='tvheadend web admin port, default: 9981')
 optParser.add_option('--sid',   type='int', default=None, help='SID of the service')
+optParser.add_option('--msid',   type='string', default=None, help='Multicast group ID')
 optParser.add_option('--mip',   type='string', default=None, help='Multicast IP used for service muticasting')
 optParser.add_option('--mport', type='int', default=None, help='Multicast port used for service muticasting')
 optParser.add_option('--mux',   type='string', default='pass', help='Mux type: [pass, raw, ..], default: pass')
@@ -42,14 +43,23 @@ def execApiRequestJ(path):
 	response = urllib2.urlopen('http://%s:%i%s' % (opts.host, opts.port, path)).read()
 	return json.loads(response)
 
+def kill(sid):
+	cnns = execApiRequestJ('/api/status/connections')
+	if cnns and 'entries' in cnns:
+		for e in cnns['entries']:
+			if e['type'] == 'UDP-MULTICAST' and e['user'] == sid:
+				print 'Closing multicast group %s' % e['user']
+				execApiRequestJ('/api/connections/cancel?'+ urllib.urlencode({'id': e['id']}))
+				break
 def killall():
 	cnns = execApiRequestJ('/api/status/connections')
 	if cnns and 'entries' in cnns:
-		ents = '[' + ','.join(str(e['id']) for e in cnns['entries'] if e['type'] == 'UDP-MULTICAST') + ']'
+		ids = [str(e['id']) for e in cnns['entries'] if e['type'] == 'UDP-MULTICAST']
+		ents = '[' + ','.join(ids) + ']'
 		if len(ents) <= 2:
 			print "No multicast connections found to stop..."
 			return
-		print "Closing %d multicasts..." % len(ents)
+		print "Closing %d multicasts..." % len(ids)
 		execApiRequestJ('/api/connections/cancel?'+ urllib.urlencode({'id': ents}))
 
 	time.sleep(0.5)
@@ -70,16 +80,26 @@ def check(address, port, cnns=None):
 		return uname in unames
 	return None 
 
-def startFromFile(fileName, mux='pass'):
+def startFromFile(fileName, mux='pass', sid=None, msid=None):
 	services = execApiRequestJ('/api/service/list')
 	cnns = execApiRequestJ('/api/status/connections')
 	f = open(fileName, 'r')
+	i=0
 	for line in f:
+		i+=1
 		mcast_opts = line.split(',')
 		if mcast_opts and len(mcast_opts) > 5:
+			sid_opt = int(float(mcast_opts[4]))
+			if sid and sid != sid_opt:
+				if msid and msid == mcast_opts[5]:
+					print "Requested sid and multicast address mismatch in: %s:%d" % (fileName, i)
+				continue
+			if msid and msid != mcast_opts[5]:
+				if sid and sid == sid_opt:
+					print "Requested sid and multicast address mismatch in: %s:%d" % (fileName, i)
+				continue
 			ipport = mcast_opts[5].split(':')
-			start(int(float(mcast_opts[4])), ipport[0], int(ipport[1]), 'pass', services, cnns)
-#		print '%s %s' % (mcast_opts[4], mcast_opts[5])
+			start(sid_opt, ipport[0], int(ipport[1]), 'pass', services, cnns)
 
 def start(sid, address, port, mux, services=None, cnns=None):
 	busy = check(address, port, cnns)
@@ -112,11 +132,16 @@ def start(sid, address, port, mux, services=None, cnns=None):
 
 try:
 	for action in args:
-		if action == 'killall':
+		if action == 'kill':
+			if opts.msid:
+				kill(opts.msid)
+			else:
+				print 'Connection ID missing...'
+		elif action == 'killall':
 			killall()
 		elif action == 'start':
 			if opts.fname:
-				startFromFile(opts.fname, opts.mux)
+				startFromFile(opts.fname, opts.mux, opts.sid, opts.msid)
 			elif not opts.sid or not opts.mip or not opts.mport:
 				print 'Not enough parameters provided...'
 			else:
