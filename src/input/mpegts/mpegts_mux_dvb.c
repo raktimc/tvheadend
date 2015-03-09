@@ -182,6 +182,24 @@ dvb_mux_dvbt_class_delsys_enum (void *o)
   return list;
 }
 
+static int
+dvb_mux_dvbt_class_frequency_set ( void *o, const void *v )
+{
+  dvb_mux_t *lm = o;
+  uint32_t val = *(uint32_t *)v;
+
+  if (val < 1000)
+    val *= 1000000;
+  else if (val < 1000000)
+    val *= 1000;
+
+  if (val != lm->lm_tuning.dmc_fe_freq) {
+    lm->lm_tuning.dmc_fe_freq = val;
+    return 1;
+  }
+  return 0;
+}
+
 const idclass_t dvb_mux_dvbt_class =
 {
   .ic_super      = &dvb_mux_class,
@@ -196,6 +214,7 @@ const idclass_t dvb_mux_dvbt_class =
       .id       = "frequency",
       .name     = "Frequency (Hz)",
       .off      = offsetof(dvb_mux_t, lm_tuning.dmc_fe_freq),
+      .set      = dvb_mux_dvbt_class_frequency_set,
     },
     {
       MUX_PROP_STR("bandwidth", "Bandwidth", dvbt, bw, "AUTO")
@@ -217,6 +236,13 @@ const idclass_t dvb_mux_dvbt_class =
     },
     {
       MUX_PROP_STR("fec_lo", "FEC Low", dvbt, feclo, "AUTO"),
+    },
+    {
+      .type     = PT_INT,
+      .id       = "plp_id",
+      .name     = "PLP ID",
+      .off      = offsetof(dvb_mux_t, lm_tuning.dmc_fe_stream_id),
+      .def.i	= DVB_NO_STREAM_ID_FILTER,
     },
     {}
   }
@@ -260,6 +286,7 @@ const idclass_t dvb_mux_dvbc_class =
       .id       = "frequency",
       .name     = "Frequency (Hz)",
       .off      = offsetof(dvb_mux_t, lm_tuning.dmc_fe_freq),
+      .set      = dvb_mux_dvbt_class_frequency_set,
     },
     {
       .type     = PT_U32,
@@ -282,6 +309,38 @@ dvb_mux_class_X(dvbs, qpsk, fec_inner,             fec,
                      DVB_FEC_1_2, DVB_FEC_2_3, DVB_FEC_3_4, DVB_FEC_3_5,
                      DVB_FEC_4_5, DVB_FEC_5_6, DVB_FEC_7_8, DVB_FEC_8_9,
                      DVB_FEC_9_10);
+
+static int
+dvb_mux_dvbs_class_frequency_set ( void *o, const void *v )
+{
+  dvb_mux_t *lm = o;
+  uint32_t val = *(uint32_t *)v;
+
+  if (val < 100000)
+    val *= 1000;
+
+  if (val != lm->lm_tuning.dmc_fe_freq) {
+    lm->lm_tuning.dmc_fe_freq = val;
+    return 1;
+  }
+  return 0;
+}
+
+static int
+dvb_mux_dvbs_class_symbol_rate_set ( void *o, const void *v )
+{
+  dvb_mux_t *lm = o;
+  uint32_t val = *(uint32_t *)v;
+
+  if (val < 100000)
+    val *= 1000;
+
+  if (val != lm->lm_tuning.u.dmc_fe_qpsk.symbol_rate) {
+    lm->lm_tuning.u.dmc_fe_qpsk.symbol_rate = val;
+    return 1;
+  }
+  return 0;
+}
 
 static const void *
 dvb_mux_dvbs_class_polarity_get (void *o)
@@ -401,6 +460,33 @@ dvb_mux_dvbs_class_pilot_list ( void *o )
   return list;
 }
 
+static const void *
+dvb_mux_dvbs_class_pls_mode_get ( void *o )
+{
+  static const char *s;
+  dvb_mux_t *lm = o;
+  s = dvb_plsmode2str(lm->lm_tuning.dmc_fe_pls_mode);
+  return &s;
+}
+
+static int
+dvb_mux_dvbs_class_pls_mode_set ( void *o, const void *s )
+{
+  dvb_mux_t *lm = o;
+  lm->lm_tuning.dmc_fe_pls_mode = dvb_str2plsmode(s);
+  return 1;
+}
+
+static htsmsg_t *
+dvb_mux_dvbs_class_pls_mode_list ( void *o )
+{
+  htsmsg_t *list = htsmsg_create_list();
+  htsmsg_add_str(list, NULL, dvb_plsmode2str(DVB_PLS_ROOT));
+  htsmsg_add_str(list, NULL, dvb_plsmode2str(DVB_PLS_GOLD));
+  htsmsg_add_str(list, NULL, dvb_plsmode2str(DVB_PLS_COMBO));
+  return list;
+}
+
 #define dvb_mux_dvbs_class_delsys_get dvb_mux_class_delsys_get
 #define dvb_mux_dvbs_class_delsys_set dvb_mux_class_delsys_set
 
@@ -416,39 +502,28 @@ dvb_mux_dvbs_class_delsys_enum (void *o)
 static const void *
 dvb_mux_dvbs_class_orbital_get ( void *o )
 {
-  static char buf[256], *s = buf;
+  static char buf[16], *s = buf;
   dvb_mux_t *lm = o;
-  snprintf(buf, sizeof(buf), "%0.1f%c",
-           lm->lm_tuning.u.dmc_fe_qpsk.orbital_pos / 10.0,
-           lm->lm_tuning.u.dmc_fe_qpsk.orbital_dir);
+  if (lm->lm_tuning.u.dmc_fe_qpsk.orbital_pos == INT_MAX)
+    buf[0] = '\0';
+  else
+    dvb_sat_position_to_str(lm->lm_tuning.u.dmc_fe_qpsk.orbital_pos, buf, sizeof(buf));
   return &s;
 }
 
 static int
 dvb_mux_dvbs_class_orbital_set ( void *o, const void *s )
 {
-  float posf;
-  char dir;
-  int pos, n, save = 0;
-  const char *tmp = s;
   dvb_mux_t *lm = o;
+  int pos;
 
-  /* Note that 'E' is not passed to dir from sscanf (scientific float format) */
-  if ((n = sscanf(tmp, "%f%c", &posf, &dir)) < 1) return 0;
-  if (n != 2) {
-    dir = tmp[0] != '\0' ? tmp[strlen(tmp)-1] : 0;
-    if (dir != 'E' && dir != 'W')
-      dir = 0;
-  }
-  pos = (int)floorf(posf * 10.0);
+  pos = dvb_sat_position_from_str((const char *)s);
 
-  if (pos != lm->lm_tuning.u.dmc_fe_qpsk.orbital_pos ||
-      dir != lm->lm_tuning.u.dmc_fe_qpsk.orbital_dir) {
+  if (pos != lm->lm_tuning.u.dmc_fe_qpsk.orbital_pos) {
     lm->lm_tuning.u.dmc_fe_qpsk.orbital_pos = pos;
-    lm->lm_tuning.u.dmc_fe_qpsk.orbital_dir = dir;
-    save = 1;
+    return 1;
   }
-  return save;
+  return 0;
 }
 
 const idclass_t dvb_mux_dvbs_class =
@@ -465,12 +540,14 @@ const idclass_t dvb_mux_dvbs_class =
       .id       = "frequency",
       .name     = "Frequency (kHz)",
       .off      = offsetof(dvb_mux_t, lm_tuning.dmc_fe_freq),
+      .set      = dvb_mux_dvbs_class_frequency_set,
     },
     {
       .type     = PT_U32,
       .id       = "symbolrate",
       .name     = "Symbol Rate (Sym/s)",
       .off      = offsetof(dvb_mux_t, lm_tuning.u.dmc_fe_qpsk.symbol_rate),
+      .set      = dvb_mux_dvbs_class_symbol_rate_set,
     },
     {
       MUX_PROP_STR("polarisation", "Polarisation", dvbs, polarity, NULL)
@@ -504,6 +581,29 @@ const idclass_t dvb_mux_dvbs_class =
       .set      = dvb_mux_dvbs_class_pilot_set,
       .get      = dvb_mux_dvbs_class_pilot_get,
       .list     = dvb_mux_dvbs_class_pilot_list,
+    },
+    {
+      .type     = PT_INT,
+      .id       = "stream_id",
+      .name     = "ISI (Stream ID)",
+      .off      = offsetof(dvb_mux_t, lm_tuning.dmc_fe_stream_id),
+      .def.i	= DVB_NO_STREAM_ID_FILTER,
+    },
+    {
+      .type     = PT_STR,
+      .id       = "pls_mode",
+      .name     = "PLS Mode",
+      .set      = dvb_mux_dvbs_class_pls_mode_set,
+      .get      = dvb_mux_dvbs_class_pls_mode_get,
+      .list     = dvb_mux_dvbs_class_pls_mode_list,
+      .def.s    = "ROOT",
+    },
+    {
+      .type     = PT_U32,
+      .id       = "pls_code",
+      .name     = "PLS Code",
+      .off      = offsetof(dvb_mux_t, lm_tuning.dmc_fe_pls_code),
+      .def.u32	= 1,
     },
     {
       .type     = PT_STR,
@@ -544,8 +644,9 @@ const idclass_t dvb_mux_atsc_class =
     {
       .type     = PT_U32,
       .id       = "frequency",
-      .name     = "Frequency (kHz)",
+      .name     = "Frequency (Hz)",
       .off      = offsetof(dvb_mux_t, lm_tuning.dmc_fe_freq),
+      .set      = dvb_mux_dvbt_class_frequency_set,
     },
     {
       MUX_PROP_STR("modulation", "Modulation", atsc, qam, "AUTO")
@@ -575,7 +676,7 @@ dvb_mux_display_name ( mpegts_mux_t *mm, char *buf, size_t len )
   dvb_mux_t *lm = (dvb_mux_t*)mm;
   dvb_network_t *ln = (dvb_network_t*)mm->mm_network;
   uint32_t freq = lm->lm_tuning.dmc_fe_freq, freq2;
-  char extra[8];
+  char extra[8], buf2[5], *p;
   if (ln->ln_type == DVB_TYPE_S) {
     const char *s = dvb_pol2str(lm->lm_tuning.u.dmc_fe_qpsk.polarisation);
     if (s) extra[0] = *s;
@@ -586,10 +687,14 @@ dvb_mux_display_name ( mpegts_mux_t *mm, char *buf, size_t len )
   }
   freq2 = freq % 1000;
   freq /= 1000;
-  while (freq2 && (freq2 % 10) == 0)
+  snprintf(buf2, sizeof(buf2), "%03d", freq2);
+  p = buf2 + 2;
+  while (freq2 && (freq2 % 10) == 0) {
     freq2 /= 10;
+    *(p--) = '\0';
+  }
   if (freq2)
-    snprintf(buf, len, "%d.%d%s", freq, freq2, extra);
+    snprintf(buf, len, "%d.%s%s", freq, buf2, extra);
   else
     snprintf(buf, len, "%d%s", freq, extra);
 }
@@ -649,10 +754,18 @@ dvb_mux_create0
   }
 
   /* Create */
-  if (!(mm = mpegts_mux_create0(calloc(1, sizeof(dvb_mux_t)), idc, uuid,
-                                (mpegts_network_t*)ln, onid, tsid, conf)))
-    return NULL;
+  mm = calloc(1, sizeof(dvb_mux_t));
   lm = (dvb_mux_t*)mm;
+
+  /* Defaults */
+  dvb_mux_conf_init(&lm->lm_tuning, ln->ln_type);
+
+  /* Parent init and load config */
+  if (!(mm = mpegts_mux_create0(mm, idc, uuid,
+                                (mpegts_network_t*)ln, onid, tsid, conf))) {
+    free(mm);
+    return NULL;
+  }
 
   /* Tuning */
   if (dmc)
@@ -665,12 +778,6 @@ dvb_mux_create0
   lm->mm_config_save      = dvb_mux_config_save;
   lm->mm_create_instances = dvb_mux_create_instances;
 
-  /* Defaults */
-  if (dmc == NULL) {
-    lm->lm_tuning.dmc_fe_inversion = DVB_INVERSION_AUTO;
-    lm->lm_tuning.dmc_fe_pilot     = DVB_PILOT_AUTO;
-  }
-  
   /* No config */
   if (!conf) return lm;
 
@@ -684,6 +791,16 @@ dvb_mux_create0
       mpegts_service_create1(f->hmf_name, (mpegts_mux_t *)lm, 0, 0, e);
     }
     htsmsg_destroy(c);
+  }
+
+  if (ln->mn_satpos == INT_MAX) {
+    /* Update the satellite position for the network settings */
+    if (lm->lm_tuning.u.dmc_fe_qpsk.orbital_pos != INT_MAX)
+      ln->mn_satpos = lm->lm_tuning.u.dmc_fe_qpsk.orbital_pos;
+  }
+  else {
+    /* Update the satellite position for the mux setting */
+    lm->lm_tuning.u.dmc_fe_qpsk.orbital_pos = ln->mn_satpos;
   }
 
   return lm;

@@ -51,11 +51,13 @@ typedef struct mk_track {
   int avc;
   int type;
   int tracknum;
+  int tracktype;
   int disabled;
   int64_t nextpts;
 
   uint8_t channels;
   uint8_t sri;
+  uint8_t ext_sri;
 
   uint16_t aspect_num;
   uint16_t aspect_den;
@@ -334,6 +336,7 @@ mk_build_tracks(mk_mux_t *mkm, const streaming_start_t *ss)
     }
 
     tr->tracknum = ++tracknum;
+    tr->tracktype = tracktype;
     mkm->has_video |= (tracktype == 1);
     
     t = htsbuf_queue_alloc(0);
@@ -430,6 +433,8 @@ mk_build_tracks(mk_mux_t *mkm, const streaming_start_t *ss)
       htsbuf_queue_t *au = htsbuf_queue_alloc(0);
 
       ebml_append_float(au, 0xb5, sri_to_rate(ssc->ssc_sri));
+      if (ssc->ssc_ext_sri)
+        ebml_append_float(au, 0x78b5, sri_to_rate(ssc->ssc_ext_sri - 1));
       ebml_append_uint(au, 0x9f, ssc->ssc_channels);
       if (bit_depth)
         ebml_append_uint(au, 0x6264, bit_depth);
@@ -976,7 +981,7 @@ mk_write_frame_i(mk_mux_t *mkm, mk_track_t *t, th_pkt_t *pkt)
     nxt = ts_rescale(t->nextpts, 1000000000 / MATROSKA_TIMESCALE);
     pts = ts_rescale(pts,        1000000000 / MATROSKA_TIMESCALE);
 
-    if(mkm->totduration < nxt)
+    if((t->tracktype == 1 || t->tracktype == 2) && mkm->totduration < nxt)
       mkm->totduration = nxt;
 
     delta = pts - mkm->cluster_tc;
@@ -1188,7 +1193,7 @@ mk_mux_write_pkt(mk_mux_t *mkm, th_pkt_t *pkt)
       break;
   }
   
-  if(i >= mkm->ntracks) {
+  if(i >= mkm->ntracks || pkt->pkt_payload == NULL) {
     pkt_ref_dec(pkt);
     return mkm->error;
   }
@@ -1213,6 +1218,7 @@ mk_mux_write_pkt(mk_mux_t *mkm, th_pkt_t *pkt)
      pkt->pkt_sri) {
     mark = 1;
     t->sri = pkt->pkt_sri;
+    t->ext_sri = pkt->pkt_ext_sri;
   }
   if(pkt->pkt_commercial != t->commercial && 
      pkt->pkt_commercial != COMMERCIAL_UNKNOWN) {

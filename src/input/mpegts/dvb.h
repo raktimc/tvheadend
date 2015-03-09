@@ -236,6 +236,8 @@ void psi_tables_dvb     ( struct mpegts_mux *mm );
 void psi_tables_atsc_t  ( struct mpegts_mux *mm );
 void psi_tables_atsc_c  ( struct mpegts_mux *mm );
 
+extern htsmsg_t *satellites;
+
 /*
  *
  */
@@ -410,6 +412,12 @@ typedef enum dvb_fe_rolloff {
   DVB_ROLLOFF_35         = 350,
 } dvb_fe_rolloff_t;
 
+typedef enum dvb_fe_pls_mode {
+  DVB_PLS_ROOT = 0,
+  DVB_PLS_GOLD,
+  DVB_PLS_COMBO,
+} dvb_fe_pls_mode_t;
+
 typedef enum dvb_polarisation {
   DVB_POLARISATION_HORIZONTAL     = 0x00,
   DVB_POLARISATION_VERTICAL       = 0x01,
@@ -418,10 +426,11 @@ typedef enum dvb_polarisation {
   DVB_POLARISATION_OFF            = 0x04
 } dvb_polarisation_t;
 
+#define DVB_NO_STREAM_ID_FILTER (-1)
+
 typedef struct dvb_qpsk_config {
   dvb_polarisation_t  polarisation;
   int                 orbital_pos;
-  char                orbital_dir;
   uint32_t            symbol_rate;
   dvb_fe_code_rate_t  fec_inner;
 } dvb_qpsk_config_t;
@@ -449,6 +458,9 @@ typedef struct dvb_mux_conf
   dvb_fe_spectral_inversion_t dmc_fe_inversion;
   dvb_fe_rolloff_t            dmc_fe_rolloff;
   dvb_fe_pilot_t              dmc_fe_pilot;
+  int32_t                     dmc_fe_stream_id;
+  dvb_fe_pls_mode_t           dmc_fe_pls_mode;
+  uint32_t                    dmc_fe_pls_code;
   union {
     dvb_qpsk_config_t         dmc_fe_qpsk;
     dvb_qam_config_t          dmc_fe_qam;
@@ -473,6 +485,7 @@ const char *dvb_hier2str    ( int hier );
 const char *dvb_pol2str     ( int pol );
 const char *dvb_type2str    ( int type );
 const char *dvb_pilot2str   ( int pilot );
+const char *dvb_plsmode2str   ( int pls_mode );
 #define dvb_feclo2str dvb_fec2str
 #define dvb_fechi2str dvb_fec2str
 
@@ -488,6 +501,7 @@ int dvb_str2hier    ( const char *str );
 int dvb_str2pol     ( const char *str );
 int dvb_str2type    ( const char *str );
 int dvb_str2pilot   ( const char *str );
+int dvb_str2plsmode ( const char *str );
 #define dvb_str2feclo dvb_str2fec
 #define dvb_str2fechi dvb_str2fec
 
@@ -498,9 +512,9 @@ static inline int dvb_bandwidth( dvb_fe_bandwidth_t bw )
 
 int dvb_delsys2type ( enum dvb_fe_delivery_system ds );
 
-int dvb_mux_conf_str ( dvb_mux_conf_t *conf, char *buf, size_t bufsize );
+void dvb_mux_conf_init ( dvb_mux_conf_t *dmc, dvb_fe_delivery_system_t delsys );
 
-int dvb_sat_position( const dvb_mux_conf_t *mc );
+int dvb_mux_conf_str ( dvb_mux_conf_t *conf, char *buf, size_t bufsize );
 
 const char *dvb_sat_position_to_str( int position, char *buf, size_t buflen );
 

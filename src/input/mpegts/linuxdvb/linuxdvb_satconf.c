@@ -216,6 +216,14 @@ const idclass_t linuxdvb_satconf_class =
   .ic_save       = linuxdvb_satconf_class_save,
   .ic_properties = (const property_t[]) {
     {
+      .type     = PT_BOOL,
+      .id       = "early_tune",
+      .name     = "Tune Before DiseqC",
+      .off      = offsetof(linuxdvb_satconf_t, ls_early_tune),
+      .opts     = PO_ADVANCED,
+      .def.i    = 1
+    },
+    {
       .type     = PT_INT,
       .id       = "diseqc_repeats",
       .name     = "DiseqC repeats",
@@ -229,6 +237,7 @@ const idclass_t linuxdvb_satconf_class =
       .name     = "Full DiseqC",
       .off      = offsetof(linuxdvb_satconf_t, ls_diseqc_full),
       .opts     = PO_ADVANCED,
+      .def.i    = 1
     },
     {
       .type     = PT_BOOL,
@@ -831,11 +840,8 @@ linuxdvb_satconf_start_mux
   f = lse->lse_lnb->lnb_freq(lse->lse_lnb, lm);
   if (f == (uint32_t)-1)
     return SM_CODE_TUNING_FAILED;
-#if 0
-  // Note: unfortunately, this test also "delays" the valid
-  //       tune request, so it's disabled now until we create
-  //       own parameter validator
-  if (!lse->lse_en50494) {
+
+  if (ls->ls_early_tune && !lse->lse_en50494) {
     r = linuxdvb_frontend_tune0(lfe, mmi, f);
     if (r) return r;
   } else {
@@ -843,11 +849,6 @@ linuxdvb_satconf_start_mux
     r = linuxdvb_frontend_clear(lfe);
     if (r) return r;
   }
-#else
-  /* Clear the frontend settings, open frontend fd */
-  r = linuxdvb_frontend_clear(lfe);
-  if (r) return r;
-#endif
 
   /* Diseqc */
   ls->ls_mmi        = mmi;
@@ -890,6 +891,8 @@ linuxdvb_satconf_create
   ls->ls_type     = lst->type;
   TAILQ_INIT(&ls->ls_elements);
 
+  ls->ls_early_tune = 1;
+  ls->ls_diseqc_full = 1;
   ls->ls_max_rotor_move = 120;
 
   /* Create node */

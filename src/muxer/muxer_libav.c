@@ -105,8 +105,6 @@ lav_muxer_add_stream(lav_muxer_t *lm,
     break;
   }
 
-
-
   if(ssc->ssc_gh) {
     if (ssc->ssc_type == SCT_H264) {
       sbuf_t hdr;
@@ -404,6 +402,8 @@ lav_muxer_write_pkt(muxer_t *m, streaming_message_type_t smt, void *data)
     st = oc->streams[i];
 
     if(st->id != pkt->pkt_componentindex)
+      continue;
+    if(pkt->pkt_payload == NULL)
       continue;
 
     av_init_packet(&packet);

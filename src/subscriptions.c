@@ -427,11 +427,12 @@ subscription_input_direct(void *opauqe, streaming_message_t *sm)
   /* Log data and errors */
   if(sm->sm_type == SMT_PACKET) {
     th_pkt_t *pkt = sm->sm_data;
-    if(pkt->pkt_err)
-      s->ths_total_err++;
-    s->ths_bytes_in += pkt->pkt_payload->pb_size;
+    s->ths_total_err += pkt->pkt_err;
+    if (pkt->pkt_payload)
+      s->ths_bytes_in += pkt->pkt_payload->pb_size;
   } else if(sm->sm_type == SMT_MPEGTS) {
     pktbuf_t *pb = sm->sm_data;
+    s->ths_total_err += pb->pb_err;
     s->ths_bytes_in += pb->pb_size;
   }
 
@@ -741,16 +742,16 @@ static void
 mux_data_timeout ( void *aux )
 {
   th_subscription_t *s = aux;
-  mpegts_input_t *mi = s->ths_mmi->mmi_input;
 
   if (!s->ths_mmi)
     return;
 
-  if (!mi->mi_live) {
+  if (!s->ths_live) {
+    tvhwarn("subscription", "%04X: mux data timeout for %s", shortid(s), s->ths_title);
     mpegts_mux_remove_subscriber(s->ths_mmi->mmi_mux, s, SM_CODE_NO_INPUT);
     return;
   }
-  mi->mi_live = 0;
+  s->ths_live = 0;
 
   if (s->ths_timeout > 0)
     gtimer_arm(&s->ths_receive_timer, mux_data_timeout, s, s->ths_timeout);

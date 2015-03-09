@@ -509,7 +509,7 @@ linuxdvb_frontend_monitor ( void *aux )
   
   /* Disabled */
   if (!lfe->mi_enabled && mmi)
-    mmi->mmi_mux->mm_stop(mmi->mmi_mux, 1);
+    mmi->mmi_mux->mm_stop(mmi->mmi_mux, 1, SM_CODE_ABORTED);
 
   /* Close FE */
   if (lfe->lfe_fe_fd > 0 && !mmi && lfe->lfe_powersave) {
@@ -949,6 +949,7 @@ typedef struct linuxdvb_tbl {
 
 #define TABLE_EOD -1
 
+#if DVB_API_VERSION >= 5
 static int
 linuxdvb2tvh ( const char *prefix, linuxdvb_tbl_t *tbl, int key, int defval )
 {
@@ -960,6 +961,7 @@ linuxdvb2tvh ( const char *prefix, linuxdvb_tbl_t *tbl, int key, int defval )
   tvhtrace("linuxdvb", "%s - linuxdvb2tvh failed %d", prefix, key);
   return defval;
 }
+#endif
 
 static int
 tvh2linuxdvb ( const char *prefix, linuxdvb_tbl_t *tbl, int key, int defval )
@@ -1281,6 +1283,13 @@ linuxdvb_frontend_tune0
     S2CMD(DTV_GUARD_INTERVAL,    p.u.ofdm.guard_interval);
     S2CMD(DTV_HIERARCHY,         p.u.ofdm.hierarchy_information);
 #endif
+    if (lm->lm_tuning.dmc_fe_delsys == DVB_SYS_DVBT2) {
+#if DVB_VER_ATLEAST(5,9)
+      S2CMD(DTV_STREAM_ID, dmc->dmc_fe_stream_id);
+#elif DVB_VER_ATLEAST(5,3)
+      S2CMD(DTV_DVBT2_PLP_ID, dmc->dmc_fe_stream_id);
+#endif
+    }
 
   /* DVB-C */
   } else if (lfe->lfe_type == DVB_TYPE_C) {
@@ -1292,12 +1301,20 @@ linuxdvb_frontend_tune0
   } else if (lfe->lfe_type == DVB_TYPE_S) {
     S2CMD(DTV_SYMBOL_RATE,       p.u.qpsk.symbol_rate);
     S2CMD(DTV_INNER_FEC,         p.u.qpsk.fec_inner);
-    S2CMD(DTV_PILOT,             TR(pilot, pilot_tbl, PILOT_AUTO));
     S2CMD(DTV_MODULATION,        TR(modulation, mod_tbl, QPSK));
     if (lm->lm_tuning.dmc_fe_delsys == DVB_SYS_DVBS) {
       S2CMD(DTV_ROLLOFF,         ROLLOFF_35);
     } else {
+      S2CMD(DTV_PILOT,           TR(pilot, pilot_tbl, PILOT_AUTO));
       S2CMD(DTV_ROLLOFF,         TR(rolloff, rolloff_tbl, ROLLOFF_AUTO));
+      r = dmc->dmc_fe_stream_id != DVB_NO_STREAM_ID_FILTER ? (dmc->dmc_fe_stream_id & 0xFF) |
+          ((dmc->dmc_fe_pls_code & 0x3FFFF)<<8) | ((dmc->dmc_fe_pls_mode & 0x3)<<26) :
+          DVB_NO_STREAM_ID_FILTER;
+#if DVB_VER_ATLEAST(5,9)
+      S2CMD(DTV_STREAM_ID,       r);
+#elif DVB_VER_ATLEAST(5,3)
+      S2CMD(DTV_DVBT2_PLP_ID,    r);
+#endif
     }
 
   /* ATSC */
@@ -1312,7 +1329,7 @@ linuxdvb_frontend_tune0
 
   /* discard stale events */
   while (1) {
-    if (ioctl(lfe->lfe_fe_fd, FE_GET_EVENT, &ev) == -1)
+    if (ioctl(lfe->lfe_fe_fd, FE_GET_EVENT, &ev) < 0)
       break;
   }
 

@@ -94,7 +94,7 @@ typedef void (*mpegts_psi_section_callback_t)
 struct mpegts_table_mux_cb
 {
   int tag;
-  int (*cb) ( mpegts_table_t*, mpegts_mux_t *mm,
+  int (*cb) ( mpegts_table_t*, mpegts_mux_t *mm, uint16_t nbid,
               const uint8_t dtag, const uint8_t *dptr, int dlen );
 };
 
@@ -283,7 +283,7 @@ struct mpegts_network
   void              (*mn_display_name) (mpegts_network_t*, char *buf, size_t len);
   void              (*mn_config_save)  (mpegts_network_t*);
   mpegts_mux_t*     (*mn_create_mux)
-    (mpegts_mux_t*, uint16_t onid, uint16_t tsid, void *conf);
+    (mpegts_mux_t*, uint16_t onid, uint16_t tsid, void *conf, int force);
   mpegts_service_t* (*mn_create_service)
     (mpegts_mux_t*, uint16_t sid, uint16_t pmt_pid);
   const idclass_t*  (*mn_mux_class)   (mpegts_network_t*);
@@ -300,6 +300,7 @@ struct mpegts_network
   int      mn_ignore_chnum;
   int      mn_sid_chnum;
   int      mn_localtime;
+  int      mn_satpos;
 };
 
 typedef enum mpegts_mux_scan_state
@@ -330,6 +331,13 @@ enum mpegts_mux_epg_flag
   MM_EPG_ONLY_OPENTV_SKY_AUSAT,
 };
 #define MM_EPG_LAST MM_EPG_ONLY_OPENTV_SKY_AUSAT
+
+enum mpegts_mux_ac3_flag
+{
+  MM_AC3_STANDARD,
+  MM_AC3_PMT_06,
+  MM_AC3_PMT_N05,
+};
 
 typedef struct tsdebug_packet {
   TAILQ_ENTRY(tsdebug_packet) link;
@@ -379,6 +387,8 @@ struct mpegts_mux
   mpegts_mux_t            *mm_dmc_origin;
   time_t                   mm_dmc_origin_expire;
 
+  char                    *mm_fastscan_muxes;
+
   /*
    * Physical instances
    */
@@ -415,7 +425,7 @@ struct mpegts_mux
   void (*mm_display_name)     (mpegts_mux_t*, char *buf, size_t len);
   int  (*mm_is_enabled)       (mpegts_mux_t *mm);
   int  (*mm_start)            (mpegts_mux_t *mm, mpegts_input_t *mi, const char *r, int w, int flags);
-  void (*mm_stop)             (mpegts_mux_t *mm, int force);
+  void (*mm_stop)             (mpegts_mux_t *mm, int force, int reason);
   void (*mm_open_table)       (mpegts_mux_t*,mpegts_table_t*,int subscribe);
   void (*mm_close_table)      (mpegts_mux_t*,mpegts_table_t*);
   void (*mm_create_instances) (mpegts_mux_t*);
@@ -428,7 +438,7 @@ struct mpegts_mux
   int   mm_enabled;
   int   mm_epg;
   char *mm_charset;
-  int   mm_pmt_06_ac3;
+  int   mm_pmt_ac3;
 
   /*
    * TSDEBUG
@@ -440,7 +450,11 @@ struct mpegts_mux
   TAILQ_HEAD(, tsdebug_packet) mm_tsdebug_packets;
 #endif
 };
- 
+
+#define PREFCAPID_OFF      0
+#define PREFCAPID_ON       1
+#define PREFCAPID_FORCE    2
+
 /* Service */
 struct mpegts_service
 {
@@ -473,6 +487,7 @@ struct mpegts_service
 
   int      s_dvb_eit_enable;
   uint64_t s_dvb_opentv_chnum;
+  uint16_t s_dvb_opentv_id;
 
   /*
    * Link to carrying multiplex and active adapter
@@ -584,7 +599,6 @@ struct mpegts_input
    */
 
   uint8_t mi_running;            /* threads running */
-  uint8_t mi_live;               /* stream is live */
   time_t mi_last_dispatch;
 
   /* Data input */
@@ -754,7 +768,7 @@ void mpegts_mux_delete ( mpegts_mux_t *mm, int delconf );
 
 void mpegts_mux_save ( mpegts_mux_t *mm, htsmsg_t *c );
 
-void mpegts_mux_tuning_error( mpegts_mux_t *mm );
+void mpegts_mux_tuning_error( const char *mux_uuid, mpegts_mux_instance_t *mmi_match );
 
 mpegts_mux_instance_t *mpegts_mux_instance_create0
   ( mpegts_mux_instance_t *mmi, const idclass_t *class, const char *uuid,
@@ -913,7 +927,7 @@ typedef struct mpegts_listener
   LIST_ENTRY(mpegts_listener) ml_link;
   void *ml_opaque;
   void (*ml_mux_start)  (mpegts_mux_t *mm, void *p);
-  void (*ml_mux_stop)   (mpegts_mux_t *mm, void *p);
+  void (*ml_mux_stop)   (mpegts_mux_t *mm, void *p, int reason);
   void (*ml_mux_create) (mpegts_mux_t *mm, void *p);
   void (*ml_mux_delete) (mpegts_mux_t *mm, void *p);
 } mpegts_listener_t;
@@ -931,6 +945,13 @@ LIST_HEAD(,mpegts_listener) mpegts_listeners;
   mpegts_listener_t *ml;\
   LIST_FOREACH(ml, &mpegts_listeners, ml_link)\
     if (ml->op) ml->op(t, ml->ml_opaque);\
+} (void)0
+
+#define mpegts_fire_event1(t, op, arg1)\
+{\
+  mpegts_listener_t *ml;\
+  LIST_FOREACH(ml, &mpegts_listeners, ml_link)\
+    if (ml->op) ml->op(t, ml->ml_opaque, arg1);\
 } (void)0
 
 /*

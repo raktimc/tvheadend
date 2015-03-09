@@ -86,6 +86,7 @@ apply_header(streaming_start_component_t *ssc, th_pkt_t *pkt)
   if(SCT_ISAUDIO(ssc->ssc_type) && !ssc->ssc_channels && !ssc->ssc_sri) {
     ssc->ssc_channels = pkt->pkt_channels;
     ssc->ssc_sri      = pkt->pkt_sri;
+    ssc->ssc_ext_sri  = pkt->pkt_ext_sri;
   }
 
   if(SCT_ISVIDEO(ssc->ssc_type)) {
@@ -105,12 +106,17 @@ apply_header(streaming_start_component_t *ssc, th_pkt_t *pkt)
   }
 
   if (ssc->ssc_type == SCT_MP4A || ssc->ssc_type == SCT_AAC) {
-    ssc->ssc_gh = pktbuf_alloc(NULL, 2);
+    ssc->ssc_gh = pktbuf_alloc(NULL, pkt->pkt_ext_sri ? 5 : 2);
     uint8_t *d = pktbuf_ptr(ssc->ssc_gh);
 
-    const int profile = 2;
+    const int profile = 2; /* AAC LC */
     d[0] = (profile << 3) | ((pkt->pkt_sri & 0xe) >> 1);
     d[1] = ((pkt->pkt_sri & 0x1) << 7) | (pkt->pkt_channels << 3);
+    if (pkt->pkt_ext_sri) { /* SBR extension */
+      d[2] = 0x56;
+      d[3] = 0xe5;
+      d[4] = 0x80 | ((pkt->pkt_ext_sri - 1) << 3);
+    }
   }
 }
 
@@ -364,7 +370,7 @@ gh_pass(globalheaders_t *gh, streaming_message_t *sm)
     break;
   case SMT_PACKET:
     pkt = sm->sm_data;
-    if (pkt->pkt_payload)
+    if (pkt->pkt_payload || pkt->pkt_err)
       streaming_target_deliver2(gh->gh_output, sm);
     else
       streaming_msg_free(sm);

@@ -295,15 +295,18 @@ epggrab_mux_start ( mpegts_mux_t *mm, void *p )
 }
 
 static void
-epggrab_mux_stop ( mpegts_mux_t *mm, void *p )
+epggrab_mux_stop ( mpegts_mux_t *mm, void *p, int reason )
 {
   epggrab_ota_mux_t *ota;
   const char *uuid = idnode_uuid_as_str(&mm->mm_id);
+  int done = EPGGRAB_OTA_DONE_STOLEN;
 
+  if (reason == SM_CODE_NO_INPUT)
+    done = EPGGRAB_OTA_DONE_NO_DATA;
   tvhtrace("epggrab", "mux %p (%s) stop", mm, uuid);
   TAILQ_FOREACH(ota, &epggrab_ota_active, om_q_link)
     if (!strcmp(ota->om_mux_uuid, uuid)) {
-      epggrab_ota_done(ota, EPGGRAB_OTA_DONE_STOLEN);
+      epggrab_ota_done(ota, done);
       break;
     }
 }
@@ -504,10 +507,13 @@ next_one:
     net->failed = 0;
   }
 
-  epg_flag = mm->mm_is_epg(mm);
-  if (epg_flag > MM_EPG_LAST)
-    epg_flag = MM_EPG_ENABLE;
-  modname  = epg_flag >= 0 ? modnames[epg_flag] : NULL;
+  epg_flag = MM_EPG_DISABLE;
+  if (mm->mm_is_enabled(mm)) {
+    epg_flag = mm->mm_is_epg(mm);
+    if (epg_flag > MM_EPG_LAST)
+      epg_flag = MM_EPG_ENABLE;
+    modname  = epg_flag >= 0 ? modnames[epg_flag] : NULL;
+  }
 
   if (epg_flag < 0 || epg_flag == MM_EPG_DISABLE) {
 #if ENABLE_TRACE
@@ -810,16 +816,23 @@ epggrab_ota_init ( void )
 }
 
 void
+epggrab_ota_trigger ( int secs )
+{
+  /* notify another system layers, that we will do EPG OTA */
+  secs = MIN(1, MAX(secs, 7*24*3600));
+  dbus_emit_signal_s64("/epggrab/ota", "next", time(NULL) + secs);
+  epggrab_ota_pending_flag = 1;
+  epggrab_ota_kick(secs);
+}
+
+void
 epggrab_ota_post ( void )
 {
   time_t t = (time_t)-1;
 
   /* Init timer (call after full init - wait for network tuners) */
   if (epggrab_ota_initial) {
-    /* notify another system layers, that we will do EPG OTA */
-    dbus_emit_signal_s64("/epggrab/ota", "next", time(NULL) + 15);
-    epggrab_ota_pending_flag = 1;
-    epggrab_ota_kick(15);
+    epggrab_ota_trigger(15);
     t = time(NULL);
   }
 

@@ -76,6 +76,10 @@ dvb_network_class_scanfile_set ( void *o, const void *s )
   if (!(sfn = scanfile_find(s)))
     return 0;
 
+  /* Set satellite position */
+  if (sfn->sfn_satpos != INT_MAX && ln->mn_satpos == INT_MAX)
+    ln->mn_satpos = sfn->sfn_satpos;
+
   /* Create */
   LIST_FOREACH(dmc, &sfn->sfn_muxes, dmc_link) {
     if (!(mm = dvb_network_find_mux(ln, dmc, MPEGTS_ONID_NONE, MPEGTS_TSID_NONE))) {
@@ -103,35 +107,86 @@ dvb_network_class_scanfile_set ( void *o, const void *s )
   return 0;
 }
 static htsmsg_t *
-dvb_network_class_scanfile_list ( const char *type )
+dvb_network_class_scanfile_list ( void *o, const char *type )
 {
+  dvb_network_t *ln = o;
   htsmsg_t *e, *m = htsmsg_create_map();
   htsmsg_add_str(m, "type", "api");
   htsmsg_add_str(m, "uri", "dvb/scanfile/list");
+  htsmsg_add_str(m, "stype", "none");
   e = htsmsg_create_map();
   htsmsg_add_str(e, "type", type);
+  if (ln && ln->mn_satpos != INT_MAX)
+    htsmsg_add_s32(e, "satpos", ln->mn_satpos);
   htsmsg_add_msg(m, "params", e);
   return m;
 }
+
 static htsmsg_t *
 dvb_network_dvbt_class_scanfile_list ( void *o )
 {
-  return dvb_network_class_scanfile_list("dvbt");
+  return dvb_network_class_scanfile_list(o, "dvbt");
 }
 static htsmsg_t *
 dvb_network_dvbc_class_scanfile_list ( void *o )
 {
-  return dvb_network_class_scanfile_list("dvbc");
+  return dvb_network_class_scanfile_list(o, "dvbc");
 }
 static htsmsg_t *
 dvb_network_dvbs_class_scanfile_list ( void *o )
 {
-  return dvb_network_class_scanfile_list("dvbs");
+  return dvb_network_class_scanfile_list(o, "dvbs");
 }
 static htsmsg_t *
 dvb_network_atsc_class_scanfile_list ( void *o )
 {
-  return dvb_network_class_scanfile_list("atsc");
+  return dvb_network_class_scanfile_list(o, "atsc");
+}
+
+static const void *
+dvb_network_class_orbital_pos_get ( void *o )
+{
+  dvb_network_t *ln = o;
+  static char buf[16];
+  static const char *s;
+  s = NULL;
+  if (ln->mn_satpos != INT_MAX) {
+    dvb_sat_position_to_str(ln->mn_satpos, buf, sizeof(buf));
+    s = buf;
+  } else
+    s = "";
+  return &s;
+}
+
+static int
+dvb_network_class_orbital_pos_set ( void *o, const void *s )
+{
+  dvb_network_t *ln = o;
+  int satpos;
+
+  /* Find */
+  if (!s)
+    return 0;
+
+  satpos = dvb_sat_position_from_str(s);
+  if (satpos != ln->mn_satpos) {
+    ln->mn_satpos = satpos;
+    return 1;
+  }
+
+  return 0;
+}
+
+static htsmsg_t *
+dvb_network_class_orbital_pos_list ( void *o )
+{
+  htsmsg_t *e, *m = htsmsg_create_map();
+  htsmsg_add_str(m, "type", "api");
+  htsmsg_add_str(m, "uri", "dvb/orbitalpos/list");
+  htsmsg_add_str(m, "stype", "none");
+  e = htsmsg_create_map();
+  htsmsg_add_msg(m, "params", e);
+  return m;
 }
 
 const idclass_t dvb_network_class =
@@ -198,6 +253,14 @@ const idclass_t dvb_network_dvbs_class =
       .list     = dvb_network_dvbs_class_scanfile_list,
       .opts     = PO_NOSAVE,
     },
+    {
+      .type     = PT_STR,
+      .id       = "orbital_pos",
+      .name     = "Orbital Position",
+      .set      = dvb_network_class_orbital_pos_set,
+      .get      = dvb_network_class_orbital_pos_get,
+      .list     = dvb_network_class_orbital_pos_list,
+    },
     {}
   }
 };
@@ -255,16 +318,11 @@ dvb_network_check_symbol_rate( dvb_mux_t *lm, dvb_mux_conf_t *dmc, int deltar )
 }
 
 static int
-dvb_network_check_orbital_pos ( dvb_mux_t *lm, dvb_mux_conf_t *dmc )
+dvb_network_check_orbital_pos ( int satpos1, int satpos2 )
 {
-  if (lm->lm_tuning.u.dmc_fe_qpsk.orbital_dir &&
-      dmc->u.dmc_fe_qpsk.orbital_dir) {
-    if (lm->lm_tuning.u.dmc_fe_qpsk.orbital_dir !=
-                 dmc->u.dmc_fe_qpsk.orbital_dir)
-      return 1;
+  if (satpos1 != INT_MAX && satpos2 != INT_MAX) {
     /* 1W and 0.8W */
-    if (abs(lm->lm_tuning.u.dmc_fe_qpsk.orbital_pos -
-                     dmc->u.dmc_fe_qpsk.orbital_pos) > 2)
+    if (abs(satpos1 - satpos2) > 2)
       return 1;
   }
   return 0;
@@ -311,8 +369,12 @@ dvb_network_find_mux
       if (lm->lm_tuning.u.dmc_fe_qpsk.polarisation != dmc->u.dmc_fe_qpsk.polarisation) continue;
 
       /* Same orbital position */
-      if (dvb_network_check_orbital_pos(lm, dmc)) continue;
+      if (dvb_network_check_orbital_pos(lm->lm_tuning.u.dmc_fe_qpsk.orbital_pos,
+                                        dmc->u.dmc_fe_qpsk.orbital_pos)) continue;
     }
+
+    /* Same PLP/ISI */
+    if (lm->lm_tuning.dmc_fe_stream_id != dmc->dmc_fe_stream_id) continue;
 
     mm_alt = mm;
 
@@ -359,31 +421,43 @@ dvb_network_mux_class
 
 static mpegts_mux_t *
 dvb_network_create_mux
-  ( mpegts_mux_t *mm, uint16_t onid, uint16_t tsid, void *p )
+  ( mpegts_mux_t *mm, uint16_t onid, uint16_t tsid, void *p, int force )
 {
-  int save = 0;
+  int save = 0, satpos;
   mpegts_mux_t *mmo = mm;
-  dvb_network_t *ln = (dvb_network_t*)mm->mm_network;
+  mpegts_network_t *mn = mm->mm_network;
+  dvb_network_t *ln;
   dvb_mux_conf_t *dmc = p;
+  const idclass_t *cls = dvb_network_mux_class(mn);
 
+  /* when forced - try to look also to another DVB-S networks */
+  if (force && cls == &dvb_mux_dvbs_class && dmc->dmc_fe_type == DVB_TYPE_S &&
+      dmc->u.dmc_fe_qpsk.orbital_pos != INT_MAX) {
+    satpos = dvb_network_get_orbital_pos(mn);
+    if (dvb_network_check_orbital_pos(satpos, dmc->u.dmc_fe_qpsk.orbital_pos)) {
+      LIST_FOREACH(mn, &mpegts_network_all, mn_global_link) {
+        satpos = dvb_network_get_orbital_pos(mn);
+        if (satpos == INT_MAX) continue;
+        if (!dvb_network_check_orbital_pos(satpos, dmc->u.dmc_fe_qpsk.orbital_pos))
+          break;
+      }
+      if (mn == NULL)
+        return NULL;
+    }
+  }
+
+  ln = (dvb_network_t*)mn;
   mm = dvb_network_find_mux(ln, dmc, onid, tsid);
-  if (!mm && ln->mn_autodiscovery) {
-    const idclass_t *cls;
+  if (!mm && (ln->mn_autodiscovery || force)) {
     cls = dvb_network_mux_class((mpegts_network_t *)ln);
     save |= cls == &dvb_mux_dvbt_class && dmc->dmc_fe_type == DVB_TYPE_T;
     save |= cls == &dvb_mux_dvbc_class && dmc->dmc_fe_type == DVB_TYPE_C;
     save |= cls == &dvb_mux_dvbs_class && dmc->dmc_fe_type == DVB_TYPE_S;
     save |= cls == &dvb_mux_atsc_class && dmc->dmc_fe_type == DVB_TYPE_ATSC;
     if (save && dmc->dmc_fe_type == DVB_TYPE_S) {
-      mpegts_mux_t *mm2;
-      dvb_mux_t *lm;
-      LIST_FOREACH(mm2, &ln->mn_muxes, mm_network_link) {
-       lm = (dvb_mux_t *)mm2;
-       if (lm->lm_tuning.u.dmc_fe_qpsk.orbital_dir)
-         break;
-      }
-      /* do not allow to mix sattelite positions */
-      if (mm2 && dvb_network_check_orbital_pos(lm, dmc))
+      satpos = dvb_network_get_orbital_pos(mn);
+      /* do not allow to mix satellite positions */
+      if (dvb_network_check_orbital_pos(satpos, dmc->u.dmc_fe_qpsk.orbital_pos))
         save = 0;
     }
     if (save) {
@@ -434,10 +508,10 @@ dvb_network_create_mux
 #endif
     /* Always save the orbital position */
     if (dmc->dmc_fe_type == DVB_TYPE_S) {
-      if (lm->lm_tuning.u.dmc_fe_qpsk.orbital_dir == 0 ||
-          dvb_network_check_orbital_pos(lm, dmc))
+      if (lm->lm_tuning.u.dmc_fe_qpsk.orbital_pos == INT_MAX ||
+          dvb_network_check_orbital_pos(lm->lm_tuning.u.dmc_fe_qpsk.orbital_pos,
+                                        dmc->u.dmc_fe_qpsk.orbital_pos))
         save |= COMPARE(u.dmc_fe_qpsk.orbital_pos);
-      save |= COMPARE(u.dmc_fe_qpsk.orbital_dir);
     }
     /* Do not change anything else without autodiscovery flag */
     if (!ln->mn_autodiscovery)
@@ -453,6 +527,7 @@ dvb_network_create_mux
     save |= COMPAREN(dmc_fe_pilot);
     switch (dmc->dmc_fe_type) {
     case DVB_TYPE_T:
+      save |= COMPARE(dmc_fe_stream_id);
       save |= COMPAREN(u.dmc_fe_ofdm.bandwidth);
       save |= COMPAREN(u.dmc_fe_ofdm.code_rate_HP);
       save |= COMPAREN(u.dmc_fe_ofdm.code_rate_LP);
@@ -463,6 +538,9 @@ dvb_network_create_mux
     case DVB_TYPE_S:
       save |= COMPARE(u.dmc_fe_qpsk.polarisation);
       save |= COMPARE(u.dmc_fe_qpsk.symbol_rate);
+      save |= COMPARE(dmc_fe_stream_id);
+      save |= COMPAREN(dmc_fe_pls_mode);
+      save |= COMPAREN(dmc_fe_pls_code);
       save |= COMPAREN(u.dmc_fe_qpsk.fec_inner);
       break;
     case DVB_TYPE_C:
@@ -639,33 +717,24 @@ void dvb_network_done ( void )
  * Search
  * ***************************************************************************/
 
-dvb_network_t*
-dvb_network_find_by_uuid(const char *uuid)
-{
-  return idnode_find(uuid, &dvb_network_class, NULL);
-}
-
-int dvb_network_get_orbital_pos
-  ( mpegts_network_t *mn, int *pos, char *dir )
+int dvb_network_get_orbital_pos(mpegts_network_t *mn)
 {
   dvb_network_t *ln = (dvb_network_t *)mn;
   mpegts_mux_t  *mm;
   dvb_mux_t     *lm = NULL;
 
-  if (!mn)
-    return -1;
+  if (!ln)
+    return INT_MAX;
+  if (ln->mn_satpos != INT_MAX)
+    return ln->mn_satpos;
   LIST_FOREACH(mm, &ln->mn_muxes, mm_network_link) {
     lm = (dvb_mux_t *)mm;
-    if (lm->lm_tuning.u.dmc_fe_qpsk.orbital_dir)
+    if (lm->lm_tuning.u.dmc_fe_qpsk.orbital_pos != INT_MAX)
       break;
   }
-  if (mm) {
-    *pos = lm->lm_tuning.u.dmc_fe_qpsk.orbital_pos;
-    *dir = lm->lm_tuning.u.dmc_fe_qpsk.orbital_dir;
-    return 0;
-  } else {
-    return -1;
-  }
+  if (mm)
+    return lm->lm_tuning.u.dmc_fe_qpsk.orbital_pos;
+  return INT_MAX;
 }
 
 /******************************************************************************

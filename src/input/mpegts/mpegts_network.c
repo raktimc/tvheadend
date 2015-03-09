@@ -255,7 +255,7 @@ mpegts_network_config_save
 
 static mpegts_mux_t *
 mpegts_network_create_mux
-  ( mpegts_mux_t *mm, uint16_t sid, uint16_t tsid, void *aux )
+  ( mpegts_mux_t *mm, uint16_t sid, uint16_t tsid, void *aux, int force )
 {
   return NULL;
 }
@@ -356,6 +356,9 @@ mpegts_network_create0
   TAILQ_INIT(&mn->mn_scan_pend);
   TAILQ_INIT(&mn->mn_scan_active);
   gtimer_arm(&mn->mn_scan_timer, mpegts_network_scan_timer_cb, mn, 0);
+
+  /* Defaults */
+  mn->mn_satpos = INT_MAX;
 
   /* Load config */
   if (conf)

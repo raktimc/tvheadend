@@ -254,6 +254,7 @@ stream_init(elementary_stream_t *st)
 {
   st->es_cc = -1;
 
+  st->es_parser_state = 0;
   st->es_startcond = 0xffffffff;
   st->es_curdts = PTS_UNSET;
   st->es_curpts = PTS_UNSET;
@@ -517,7 +518,7 @@ ca_ignore:
               ca->filter |= ESFM_IGNORE;
             st->es_filter |= ESFM_IGNORE;
             break;
-          case ESFA_ONCE:
+          case ESFA_ONE_TIME:
             TAILQ_FOREACH(st2, &t->s_components, es_link)
               if (st2->es_type == SCT_CA && (st2->es_filter & ESFM_USED) != 0)
                 break;
@@ -566,7 +567,7 @@ ca_ignore:
 ignore:
             st->es_filter |= ESFM_IGNORE;
             break;
-          case ESFA_ONCE:
+          case ESFA_ONE_TIME:
             TAILQ_FOREACH(st2, &t->s_components, es_link) {
               if (st == st2)
                 continue;
@@ -700,6 +701,10 @@ service_find_instance
     si->si_mark = 1;
 
   if (ch) {
+    if (!ch->ch_enabled) {
+      *error = SM_CODE_SVC_NOT_ENABLED;
+      return NULL;
+    }
     LIST_FOREACH(csm, &ch->ch_services, csm_chn_link) {
       s = csm->csm_svc;
       if (s->s_is_enabled(s, flags))

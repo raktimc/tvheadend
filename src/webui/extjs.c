@@ -381,6 +381,19 @@ extjs_epggrab(http_connection_t *hc, const char *remain, void *opaque)
     out = htsmsg_create_map();
     htsmsg_add_u32(out, "success", 1);
 
+  /* OTA EPG trigger */
+  } else if (!strcmp(op, "otaepgTrigger") ) {
+
+    str = http_arg_get(&hc->hc_req_args, "after");
+    if (!str)
+      return HTTP_STATUS_BAD_REQUEST;
+
+    pthread_mutex_lock(&global_lock);
+    epggrab_ota_trigger(atoi(str));
+    pthread_mutex_unlock(&global_lock);
+    out = htsmsg_create_map();
+    htsmsg_add_u32(out, "success", 1);
+
   } else {
     return HTTP_STATUS_BAD_REQUEST;
   }
@@ -677,6 +690,8 @@ extjs_timeshift(http_connection_t *hc, const char *remain, void *opaque)
     htsmsg_add_u32(m, "timeshift_max_period", timeshift_max_period / 60);
     htsmsg_add_u32(m, "timeshift_unlimited_size", timeshift_unlimited_size);
     htsmsg_add_u32(m, "timeshift_max_size", timeshift_max_size / 1048576);
+    htsmsg_add_u32(m, "timeshift_ram_size", timeshift_ram_size / 1048576);
+    htsmsg_add_u32(m, "timeshift_ram_only", timeshift_ram_only);
     pthread_mutex_unlock(&global_lock);
     out = json_single_record(m, "config");
 
@@ -696,6 +711,11 @@ extjs_timeshift(http_connection_t *hc, const char *remain, void *opaque)
     timeshift_unlimited_size = http_arg_get(&hc->hc_req_args, "timeshift_unlimited_size") ? 1 : 0;
     if ((str = http_arg_get(&hc->hc_req_args, "timeshift_max_size")))
       timeshift_max_size   = atol(str) * 1048576LL;
+    if ((str = http_arg_get(&hc->hc_req_args, "timeshift_ram_size"))) {
+      timeshift_ram_size         = atol(str) * 1048576LL;
+      timeshift_ram_segment_size = timeshift_ram_size / 10;
+    }
+    timeshift_ram_only = http_arg_get(&hc->hc_req_args, "timeshift_ram_only") ? 1 : 0;
     timeshift_save();
     pthread_mutex_unlock(&global_lock);
 

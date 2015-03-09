@@ -95,6 +95,7 @@ typedef void (aparser_t)(service_t *t, elementary_stream_t *st, th_pkt_t *pkt);
 static void parse_sc(service_t *t, elementary_stream_t *st, const uint8_t *data,
                      int len, packet_parser_t *vp);
 
+static void parse_mp4a_data(service_t *t, elementary_stream_t *st, int skip_next_check);
 
 static void parse_aac(service_t *t, elementary_stream_t *st, const uint8_t *data,
                       int len, int start);
@@ -119,8 +120,9 @@ static int parse_eac3(service_t *t, elementary_stream_t *st, size_t len,
 static int parse_mp4a(service_t *t, elementary_stream_t *st, size_t ilen,
                       uint32_t next_startcode, int sc_offset);
 
-static void parser_deliver(service_t *t, elementary_stream_t *st, th_pkt_t *pkt,
-                           int errors);
+static void parser_deliver(service_t *t, elementary_stream_t *st, th_pkt_t *pkt);
+
+static void parser_deliver_error(service_t *t, elementary_stream_t *st);
 
 static int parse_pes_header(service_t *t, elementary_stream_t *st,
                             const uint8_t *buf, size_t len);
@@ -132,9 +134,11 @@ void
 parse_mpeg_ts(service_t *t, elementary_stream_t *st, const uint8_t *data, 
               int len, int start, int err)
 {
-  
-  if(err)
-    sbuf_err(&st->es_buf);
+  if(err) {
+    if (start)
+      parser_deliver_error(t, st);
+    sbuf_err(&st->es_buf, 1);
+  }
 
   switch(st->es_type) {
   case SCT_MPEG2VIDEO:
@@ -178,7 +182,6 @@ parse_mpeg_ts(service_t *t, elementary_stream_t *st, const uint8_t *data,
   }
 }
 
-
 /**
  * Parse program stream, as from V4L2, etc.
  *
@@ -218,44 +221,58 @@ parse_mpeg_ps(service_t *t, elementary_stream_t *st, uint8_t *data, int len)
 }
 
 /**
- * Parse AAC LATM
+ * Parse AAC LATM and ADTS
  */
 static void 
 parse_aac(service_t *t, elementary_stream_t *st, const uint8_t *data,
           int len, int start)
 {
-  int l, muxlen, p;
+  int l, muxlen, p, hdr = 0;
   th_pkt_t *pkt;
+  int64_t olddts = PTS_UNSET, oldpts = PTS_UNSET;
+  int64_t newdts = PTS_UNSET, newpts = PTS_UNSET;
 
-  if(start) {
-    /* Payload unit start */
-    st->es_parser_state = 1;
-    st->es_parser_ptr = 0;
-    sbuf_reset(&st->es_buf, 4000);
+  if(st->es_parser_state == 0) {
+    if (start) {
+      /* Payload unit start */
+      st->es_parser_state = 1;
+      st->es_parser_ptr = 0;
+      sbuf_reset(&st->es_buf, 4000);
+    } else {
+      return;
+    }
   }
 
-  if(st->es_parser_state == 0)
-    return;
+  if(start) {
+    int hlen;
+
+    if(len < 9)
+      return;
+
+    olddts = st->es_curdts;
+    oldpts = st->es_curpts;
+    hlen = parse_pes_header(t, st, data + 6, len - 6);
+    if (hlen >= 0 && st->es_buf.sb_ptr) {
+      newdts = st->es_curdts;
+      newpts = st->es_curpts;
+      st->es_curdts = olddts;
+      st->es_curpts = oldpts;
+    }
+
+    if(hlen < 0)
+      return;
+
+    data += 6 + hlen;
+    len  -= 6 + hlen;
+  }
 
   sbuf_append(&st->es_buf, data, len);
 
-  if(st->es_parser_ptr == 0) {
-    int hlen;
-
-    if(st->es_buf.sb_ptr < 9)
-      return;
-
-    hlen = parse_pes_header(t, st,
-                            st->es_buf.sb_data + 6, st->es_buf.sb_ptr - 6);
-    if(hlen < 0)
-      return;
-    st->es_parser_ptr += 6 + hlen;
-  }
-
-  p = st->es_parser_ptr;
+  p = 0;
 
   while((l = st->es_buf.sb_ptr - p) > 3) {
     const uint8_t *d = st->es_buf.sb_data + p;
+    /* LATM */
     if(d[0] == 0x56 && (d[1] & 0xe0) == 0xe0) {
       muxlen = (d[1] & 0x1f) << 8 | d[2];
 
@@ -264,15 +281,50 @@ parse_aac(service_t *t, elementary_stream_t *st, const uint8_t *data,
 
       pkt = parse_latm_audio_mux_element(t, st, d + 3, muxlen);
 
-      if(pkt != NULL)
-        parser_deliver(t, st, pkt, st->es_buf.sb_err);
+      if(pkt != NULL) {
+        pkt->pkt_err = st->es_buf.sb_err;
+        parser_deliver(t, st, pkt);
+        st->es_buf.sb_err = 0;
+      }
 
+      if (hdr && newdts != PTS_UNSET) {
+        st->es_curdts = newdts;
+        st->es_curpts = newpts;
+      }
       p += muxlen + 3;
+    /* ADTS */
+    } else if(p == 0 && d[0] == 0xff && (d[1] & 0xf0) == 0xf0) {
+
+      if (l < 7)
+        break;
+
+      muxlen = ((uint16_t)(d[3] & 0x03) << 11) | ((uint16_t)d[4] << 3) | (d[5] >> 5);
+      if (l < muxlen)
+        break;
+
+      sbuf_reset(&st->es_buf_a, 4000);
+      sbuf_append(&st->es_buf_a, d, muxlen);
+      parse_mp4a_data(t, st, 1);
+
+      if (hdr && newdts != PTS_UNSET) {
+        st->es_curdts = newdts;
+        st->es_curpts = newpts;
+      }
+      p += muxlen;
+
+    /* Wrong bytestream */
     } else {
+      tvhtrace("parser", "AAC skip byte %02x", d[0]);
       p++;
     }
   }
-  st->es_parser_ptr = p;
+
+  if (hdr && newdts != PTS_UNSET) {
+    st->es_curdts = newdts;
+    st->es_curpts = newpts;
+  }
+  if (p > 0)
+    sbuf_cut(&st->es_buf, p);
 }
 
 
@@ -363,6 +415,7 @@ parse_sc(service_t *t, elementary_stream_t *st, const uint8_t *data, int len,
       if(r == 1) {
         /* Reset packet parser upon length error or if parser
            tells us so */
+        parser_deliver_error(t, st);
         sbuf_reset_and_alloc(&st->es_buf, 256);
         st->es_buf.sb_data[st->es_buf.sb_ptr++] = sc >> 24;
         st->es_buf.sb_data[st->es_buf.sb_ptr++] = sc >> 16;
@@ -426,15 +479,15 @@ makeapkt(service_t *t, elementary_stream_t *st, const void *buf,
          int len, int64_t dts, int duration, int channels, int sri,
          int errors)
 {
-
   th_pkt_t *pkt = pkt_alloc(buf, len, dts, dts);
 
   pkt->pkt_commercial = t->s_tt_commercial_advice;
   pkt->pkt_duration = duration;
   pkt->pkt_channels = channels;
   pkt->pkt_sri = sri;
+  pkt->pkt_err = errors;
 
-  parser_deliver(t, st, pkt, errors);
+  parser_deliver(t, st, pkt);
 
   st->es_curdts = PTS_UNSET;
   st->es_nextdts = dts + duration;
@@ -469,14 +522,11 @@ mp4a_valid_frame(const uint8_t *buf)
   return (buf[0] == 0xff) && ((buf[1] & 0xf6) == 0xf0);
 }
 
-static int parse_mp4a(service_t *t, elementary_stream_t *st, size_t ilen,
-                      uint32_t next_startcode, int sc_offset)
+static void parse_mp4a_data(service_t *t, elementary_stream_t *st,
+                            int skip_next_check)
 {
   int i, len;
   const uint8_t *buf;
-
-  if((i = depacketize(t, st, ilen, next_startcode, sc_offset)) != 0)
-    return i;
 
  again:
   buf = st->es_buf_a.sb_data;
@@ -484,11 +534,12 @@ static int parse_mp4a(service_t *t, elementary_stream_t *st, size_t ilen,
 
   for(i = 0; i < len - 6; i++) {
     const uint8_t *p = buf + i;
+
     if(mp4a_valid_frame(p)) {
 
-      int fsize     = ((p[3] & 0x03) << 11) | (p[4] << 3) | ((p[5] & 0xe0) >> 5);
+      int fsize    = ((p[3] & 0x03) << 11) | (p[4] << 3) | ((p[5] & 0xe0) >> 5);
       int sr_index = (p[2] & 0x3c) >> 2;
-      int sr = aac_sample_rates[sr_index];
+      int sr       = aac_sample_rates[sr_index];
 
       if(sr && fsize) {
         int duration = 90000 * 1024 / sr;
@@ -498,8 +549,8 @@ static int parse_mp4a(service_t *t, elementary_stream_t *st, size_t ilen,
         if(dts == PTS_UNSET)
           dts = st->es_nextdts;
 
-        if(dts != PTS_UNSET && len >= i + fsize + 6 &&
-           mp4a_valid_frame(p + fsize)) {
+        if(dts != PTS_UNSET && len >= i + fsize + (skip_next_check ? 0 : 6) &&
+           (skip_next_check || mp4a_valid_frame(p + fsize))) {
 
           int channels = ((p[2] & 0x01) << 2) | ((p[3] & 0xc0) >> 6);
 
@@ -512,9 +563,19 @@ static int parse_mp4a(service_t *t, elementary_stream_t *st, size_t ilen,
       }
     }
   }
-  return 1;
 }
 
+static int parse_mp4a(service_t *t, elementary_stream_t *st, size_t ilen,
+                      uint32_t next_startcode, int sc_offset)
+{
+  int r;
+
+  if((r = depacketize(t, st, ilen, next_startcode, sc_offset)) != 0)
+    return r;
+
+  parse_mp4a_data(t, st, 0);
+  return 1;
+}
 
 const static int mpa_br[16] = {
     0,  32,  48,  56,
@@ -816,7 +877,6 @@ parse_pes_header(service_t *t, elementary_stream_t *st,
     pts = getpts(buf);
     dts = getpts(buf + 5);
 
-
     d = (pts - dts) & PTS_MASK;
     if(d > 180000) // More than two seconds of PTS/DTS delta, probably corrupt
       pts = dts = PTS_UNSET;
@@ -1107,6 +1167,10 @@ parse_mpeg2video(service_t *t, elementary_stream_t *st, size_t len,
         st->es_global_data_len = 0;
       }
 
+      if (st->es_buf.sb_err) {
+        pkt->pkt_err = 1;
+        st->es_buf.sb_err = 0;
+      }
       if (metalen) {
         pkt->pkt_payload = pktbuf_alloc(NULL, metalen + st->es_buf.sb_ptr - 4);
         memcpy(pktbuf_ptr(pkt->pkt_payload), pktbuf_ptr(pkt->pkt_meta), metalen);
@@ -1119,7 +1183,7 @@ parse_mpeg2video(service_t *t, elementary_stream_t *st, size_t len,
       }
       pkt->pkt_duration = st->es_frame_duration;
 
-      parser_deliver(t, st, pkt, st->es_buf.sb_err);
+      parser_deliver(t, st, pkt);
       st->es_curpkt = NULL;
 
       return 1;
@@ -1160,8 +1224,8 @@ parse_h264(service_t *t, elementary_stream_t *st, size_t len,
   /* delimiter - finished frame */
   if ((sc & 0x1f) == 9 && st->es_curpkt && st->es_curpkt->pkt_payload) {
     if (st->es_curdts != PTS_UNSET && st->es_frame_duration) {
-       parser_deliver(t, st, st->es_curpkt, st->es_buf.sb_err);
-       st->es_curpkt = NULL;
+      parser_deliver(t, st, st->es_curpkt);
+      st->es_curpkt = NULL;
 
       st->es_curdts += st->es_frame_duration;
       if (st->es_curpts != PTS_UNSET)
@@ -1189,7 +1253,7 @@ parse_h264(service_t *t, elementary_stream_t *st, size_t len,
           pkt->pkt_payload = pktbuf_append(pkt->pkt_payload, buf + 6 + l2, len - 6 - l2 - 1);
         }
 
-        parser_deliver(t, st, pkt, st->es_buf.sb_err);
+        parser_deliver(t, st, pkt);
 
         st->es_curpkt = NULL;
       }
@@ -1271,6 +1335,10 @@ parse_h264(service_t *t, elementary_stream_t *st, size_t len,
         st->es_global_data_len = 0;
       }
 
+      if (st->es_buf.sb_err) {
+        pkt->pkt_err = st->es_buf.sb_err;
+        st->es_buf.sb_err = 0;
+      }
       if (metalen) {
         pkt->pkt_payload = pktbuf_alloc(NULL, metalen + st->es_buf.sb_ptr - 4);
         memcpy(pktbuf_ptr(pkt->pkt_payload), pktbuf_ptr(pkt->pkt_meta), metalen);
@@ -1346,7 +1414,9 @@ parse_subtitles(service_t *t, elementary_stream_t *st, const uint8_t *data,
     if(buf[psize - 1] == 0xff) {
       pkt = pkt_alloc(buf, psize - 1, st->es_curpts, st->es_curdts);
       pkt->pkt_commercial = t->s_tt_commercial_advice;
-      parser_deliver(t, st, pkt, st->es_buf.sb_err);
+      pkt->pkt_err = st->es_buf.sb_err;
+      parser_deliver(t, st, pkt);
+      sbuf_reset(&st->es_buf, 4000);
     }
   }
 }
@@ -1392,10 +1462,11 @@ parse_teletext(service_t *t, elementary_stream_t *st, const uint8_t *data,
   buf = d + 6 + hlen;
   
   if(psize >= 46) {
-
       pkt = pkt_alloc(buf, psize, st->es_curpts, st->es_curdts);
       pkt->pkt_commercial = t->s_tt_commercial_advice;
-      parser_deliver(t, st, pkt, st->es_buf.sb_err);
+      pkt->pkt_err = st->es_buf.sb_err;
+      parser_deliver(t, st, pkt);
+      sbuf_reset(&st->es_buf, 4000);
   }
 }
 
@@ -1403,10 +1474,8 @@ parse_teletext(service_t *t, elementary_stream_t *st, const uint8_t *data,
  *
  */
 static void
-parser_deliver(service_t *t, elementary_stream_t *st, th_pkt_t *pkt, int error)
+parser_deliver(service_t *t, elementary_stream_t *st, th_pkt_t *pkt)
 {
-  pkt->pkt_err = error;
-
   if(SCT_ISAUDIO(st->es_type) && pkt->pkt_pts != PTS_UNSET &&
      (t->s_current_pts == PTS_UNSET ||
       pkt->pkt_pts > t->s_current_pts ||
@@ -1416,7 +1485,7 @@ parser_deliver(service_t *t, elementary_stream_t *st, th_pkt_t *pkt, int error)
   tvhtrace("parser",
            "pkt stream %2d %-12s type %c"
            " dts %10"PRId64" (%10"PRId64") pts %10"PRId64" (%10"PRId64")"
-           " dur %10d len %10zu",
+           " dur %10d len %10zu err %i",
            st->es_index,
            streaming_component_type2txt(st->es_type),
            pkt_frametype_to_char(pkt->pkt_frametype),
@@ -1425,7 +1494,8 @@ parser_deliver(service_t *t, elementary_stream_t *st, th_pkt_t *pkt, int error)
            ts_rescale(pkt->pkt_dts, 1000000),
            pkt->pkt_pts,
            pkt->pkt_duration,
-           pktbuf_len(pkt->pkt_payload));
+           pktbuf_len(pkt->pkt_payload),
+           pkt->pkt_err);
 
   pkt->pkt_aspect_num = st->es_aspect_num;
   pkt->pkt_aspect_den = st->es_aspect_den;
@@ -1435,8 +1505,10 @@ parser_deliver(service_t *t, elementary_stream_t *st, th_pkt_t *pkt, int error)
   /**
    * Input is ok
    */
-  service_set_streaming_status_flags(t, TSS_PACKETS);
-  t->s_streaming_live |= TSS_LIVE;
+  if (pkt->pkt_payload) {
+    service_set_streaming_status_flags(t, TSS_PACKETS);
+    t->s_streaming_live |= TSS_LIVE;
+  }
 
   /* Forward packet */
   pkt->pkt_componentindex = st->es_index;
@@ -1446,4 +1518,20 @@ parser_deliver(service_t *t, elementary_stream_t *st, th_pkt_t *pkt, int error)
   /* Decrease our own reference to the packet */
   pkt_ref_dec(pkt);
 
+}
+
+/**
+ * Deliver errors
+ */
+static void
+parser_deliver_error(service_t *t, elementary_stream_t *st)
+{
+  th_pkt_t *pkt;
+
+  if (!st->es_buf.sb_err)
+    return;
+  pkt = pkt_alloc(NULL, 0, PTS_UNSET, PTS_UNSET);
+  pkt->pkt_err = st->es_buf.sb_err;
+  parser_deliver(t, st, pkt);
+  st->es_buf.sb_err = 0;
 }

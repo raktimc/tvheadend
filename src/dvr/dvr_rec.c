@@ -309,6 +309,18 @@ dvr_rec_fatal_error(dvr_entry_t *de, const char *fmt, ...)
 	 de->de_filename ?: lang_str_get(de->de_title, NULL), msgbuf);
 }
 
+/**
+ *
+ */
+static void
+dvr_notify(dvr_entry_t *de, int now)
+{
+  if (now || de->de_last_notify + 5 < dispatch_clock) {
+    idnode_notify_simple(&de->de_id);
+    de->de_last_notify = dispatch_clock;
+    htsp_dvr_entry_update(de);
+  }
+}
 
 /**
  *
@@ -328,7 +340,7 @@ dvr_rec_set_state(dvr_entry_t *de, dvr_rs_state_t newstate, int error)
       de->de_errors++;
   }
   if (notify)
-    idnode_notify_simple(&de->de_id);
+    dvr_notify(de, 1);
 }
 
 /**
@@ -483,6 +495,7 @@ dvr_thread(void *aux)
   profile_chain_t *prch = de->de_chain;
   streaming_queue_t *sq = &prch->prch_sq;
   streaming_message_t *sm;
+  th_subscription_t *ts;
   th_pkt_t *pkt;
   int run = 1;
   int started = 0;
@@ -498,14 +511,24 @@ dvr_thread(void *aux)
       continue;
     }
 
-    if (de->de_s && started) {
+    if ((ts = de->de_s) != NULL && started) {
       pktbuf_t *pb = NULL;
-      if (sm->sm_type == SMT_PACKET)
+      if (sm->sm_type == SMT_PACKET) {
         pb = ((th_pkt_t*)sm->sm_data)->pkt_payload;
-      else if (sm->sm_type == SMT_MPEGTS)
+        if (((th_pkt_t*)sm->sm_data)->pkt_err) {
+          de->de_data_errors += ((th_pkt_t*)sm->sm_data)->pkt_err;
+          dvr_notify(de, 0);
+        }
+      }
+      else if (sm->sm_type == SMT_MPEGTS) {
         pb = sm->sm_data;
+        if (pb->pb_err) {
+          de->de_data_errors += pb->pb_err;
+          dvr_notify(de, 0);
+        }
+      }
       if (pb)
-        atomic_add(&de->de_s->ths_bytes_out, pktbuf_len(pb));
+        atomic_add(&ts->ths_bytes_out, pktbuf_len(pb));
     }
 
     TAILQ_REMOVE(&sq->sq_queue, sm, sm_link);
@@ -532,6 +555,7 @@ dvr_thread(void *aux)
       if(started) {
 	muxer_write_pkt(prch->prch_muxer, sm->sm_type, sm->sm_data);
 	sm->sm_data = NULL;
+	dvr_notify(de, 0);
       }
       break;
 
@@ -540,6 +564,7 @@ dvr_thread(void *aux)
 	dvr_rec_set_state(de, DVR_RS_RUNNING, 0);
 	muxer_write_pkt(prch->prch_muxer, sm->sm_type, sm->sm_data);
 	sm->sm_data = NULL;
+	dvr_notify(de, 0);
       }
       break;
 
@@ -718,6 +743,7 @@ dvr_thread_epilog(dvr_entry_t *de)
   muxer_close(prch->prch_muxer);
   muxer_destroy(prch->prch_muxer);
   prch->prch_muxer = NULL;
+  dvr_notify(de, 1);
 
   dvr_config_t *cfg = de->de_config;
   if(cfg && cfg->dvr_postproc && de->de_filename)

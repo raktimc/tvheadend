@@ -209,6 +209,8 @@ typedef struct htsp_subscription {
 
   int hs_first;
 
+  uint32_t hs_data_errors;
+
 } htsp_subscription_t;
 
 
@@ -708,7 +710,8 @@ htsp_build_dvrentry(dvr_entry_t *de, const char *method)
     break;
   case DVR_RECORDING:
     s = "recording";
-    if (de->de_rec_state == DVR_RS_ERROR)
+    if (de->de_rec_state == DVR_RS_ERROR ||
+       (de->de_rec_state == DVR_RS_PENDING && de->de_last_error != SM_CODE_OK))
       error = streaming_code2txt(de->de_last_error);
     break;
   case DVR_COMPLETED:
@@ -729,6 +732,10 @@ htsp_build_dvrentry(dvr_entry_t *de, const char *method)
   htsmsg_add_str(out, "state", s);
   if(error)
     htsmsg_add_str(out, "error", error);
+  if (de->de_errors)
+    htsmsg_add_u32(out, "streamErrors", de->de_errors);
+  if (de->de_data_errors)
+    htsmsg_add_u32(out, "dataErrors", de->de_data_errors);
   htsmsg_add_str(out, "method", method);
   return out;
 }
@@ -1406,7 +1413,7 @@ htsp_method_addDvrEntry(htsp_connection_t *htsp, htsmsg_t *in)
   epg_broadcast_t *e = NULL;
   dvr_entry_t *de;
   dvr_entry_sched_state_t dvr_status;
-  const char *dvr_config_name, *title, *desc, *creator, *lang, *comment;
+  const char *dvr_config_name, *title, *desc, *subtitle, *creator, *lang, *comment;
   int64_t start, stop, start_extra, stop_extra;
   uint32_t u32, priority, retention;
   channel_t *ch = NULL;
@@ -1448,13 +1455,17 @@ htsp_method_addDvrEntry(htsp_connection_t *htsp, htsmsg_t *in)
       return htsp_error("Invalid arguments");
 
     /* Optional attributes */
+    if (!(subtitle = htsmsg_get_str(in, "subtitle")))
+      subtitle = "";
+
+    /* Optional attributes */
     if (!(desc = htsmsg_get_str(in, "description")))
       desc = "";
 
     // create the dvr entry
     de = dvr_entry_create_htsp(dvr_config_name, ch, start, stop,
                                start_extra, stop_extra,
-                               title, desc, lang, 0,
+                               title, subtitle, desc, lang, 0,
                                htsp->htsp_granted_access->aa_username,
                                creator, NULL,
                                priority, retention, comment);
@@ -1499,7 +1510,7 @@ htsp_method_updateDvrEntry(htsp_connection_t *htsp, htsmsg_t *in)
   uint32_t dvrEntryId;
   dvr_entry_t *de;
   time_t start, stop, start_extra, stop_extra, priority, retention;
-  const char *title, *desc, *lang;
+  const char *title, *subtitle, *desc, *lang;
     
   if(htsmsg_get_u32(in, "id", &dvrEntryId))
     return htsp_error("Missing argument 'id'");
@@ -1521,11 +1532,12 @@ htsp_method_updateDvrEntry(htsp_connection_t *htsp, htsmsg_t *in)
   retention   = htsmsg_get_u32_or_default(in, "retention",  0);
   priority    = htsmsg_get_u32_or_default(in, "priority",   DVR_PRIO_NORMAL);
   title       = htsmsg_get_str(in, "title");
+  subtitle    = htsmsg_get_str(in, "title");
   desc        = htsmsg_get_str(in, "description");
   lang        = htsmsg_get_str(in, "language");
   if (!lang) lang = htsp->htsp_language;
 
-  de = dvr_entry_update(de, title, desc, lang, start, stop,
+  de = dvr_entry_update(de, title, subtitle, desc, lang, start, stop,
                         start_extra, stop_extra, priority, retention);
 
   //create response
@@ -2914,12 +2926,12 @@ _htsp_channel_update(channel_t *ch, const char *method, htsmsg_t *msg)
 {
   htsp_connection_t *htsp;
   LIST_FOREACH(htsp, &htsp_async_connections, htsp_async_link) {
-    if (htsp->htsp_async_mode & HTSP_ASYNC_ON &&
-        htsp_user_access_channel(htsp,ch)) {
-      htsmsg_t *m = msg ? htsmsg_copy(msg)
+    if (htsp->htsp_async_mode & HTSP_ASYNC_ON)
+      if (htsp_user_access_channel(htsp,ch)) {
+        htsmsg_t *m = msg ? htsmsg_copy(msg)
                         : htsp_build_channel(ch, method, htsp);
-      htsp_send_message(htsp, m, NULL);
-    }
+        htsp_send_message(htsp, m, NULL);
+      }
   }
   htsmsg_destroy(msg);
 }
@@ -3017,13 +3029,13 @@ _htsp_dvr_entry_update(dvr_entry_t *de, const char *method, htsmsg_t *msg)
 {
   htsp_connection_t *htsp;
   LIST_FOREACH(htsp, &htsp_async_connections, htsp_async_link) {
-    if (htsp->htsp_async_mode & HTSP_ASYNC_ON &&
-        !dvr_entry_verify(de, htsp->htsp_granted_access, 1) &&
-        htsp_user_access_channel(htsp, de->de_channel)) {
-      htsmsg_t *m = msg ? htsmsg_copy(msg)
+    if (htsp->htsp_async_mode & HTSP_ASYNC_ON)
+      if (!dvr_entry_verify(de, htsp->htsp_granted_access, 1) &&
+          htsp_user_access_channel(htsp, de->de_channel)) {
+        htsmsg_t *m = msg ? htsmsg_copy(msg)
                         : htsp_build_dvrentry(de, method);
-      htsp_send_message(htsp, m, NULL);
-    }
+        htsp_send_message(htsp, m, NULL);
+      }
   }
   htsmsg_destroy(msg);
 }
@@ -3174,13 +3186,13 @@ _htsp_event_update(epg_broadcast_t *ebc, const char *method, htsmsg_t *msg)
 {
   htsp_connection_t *htsp;
   LIST_FOREACH(htsp, &htsp_async_connections, htsp_async_link) {
-    if (htsp->htsp_async_mode & HTSP_ASYNC_EPG &&
-        htsp_user_access_channel(htsp,ebc->channel)) {
-      htsmsg_t *m = msg ? htsmsg_copy(msg)
+    if (htsp->htsp_async_mode & HTSP_ASYNC_EPG)
+      if (htsp_user_access_channel(htsp,ebc->channel)) {
+        htsmsg_t *m = msg ? htsmsg_copy(msg)
                         : htsp_build_event(ebc, method, htsp->htsp_language,
                                            0, htsp);
-      htsp_send_message(htsp, m, NULL);
-    }
+        htsp_send_message(htsp, m, NULL);
+      }
   }
   htsmsg_destroy(msg);
 }
@@ -3233,6 +3245,12 @@ htsp_stream_deliver(htsp_subscription_t *hs, th_pkt_t *pkt)
   int64_t ts;
   int qlen = hs->hs_q.hmq_payload;
   size_t payloadlen;
+
+  if (pkt->pkt_err)
+    hs->hs_data_errors += pkt->pkt_err;
+  if(pkt->pkt_payload == NULL) {
+    return;
+  }
 
   if(!htsp_is_stream_enabled(hs, pkt->pkt_componentindex)) {
     pkt_ref_dec(pkt);
@@ -3292,6 +3310,8 @@ htsp_stream_deliver(htsp_subscription_t *hs, th_pkt_t *pkt)
     htsmsg_add_u32(m, "subscriptionId", hs->hs_sid);
     htsmsg_add_u32(m, "packets", hs->hs_q.hmq_length);
     htsmsg_add_u32(m, "bytes", hs->hs_q.hmq_payload);
+    if (hs->hs_data_errors)
+      htsmsg_add_u32(m, "errors", hs->hs_data_errors);
 
     /**
      * Figure out real time queue delay 

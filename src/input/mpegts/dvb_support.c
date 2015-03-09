@@ -31,6 +31,7 @@
 #include "dvb_charset_tables.h"
 #include "input.h"
 #include "intlconv.h"
+#include "settings.h"
 
 static int convert_iso_8859[16] = {
   -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, -1, 11, 12, 13
@@ -440,6 +441,7 @@ dvb_convert_date(const uint8_t *dvb_buf, int local)
  */
 #if ENABLE_MPEGTS_DVB
 
+htsmsg_t *satellites;
 
 #define dvb_str2val(p)\
 const char *dvb_##p##2str (int p)         { return val2str(p, p##tab); }\
@@ -758,14 +760,41 @@ const static struct strtab pilottab[] = {
   {"OFF",  DVB_PILOT_OFF}
 };
 dvb_str2val(pilot);
+
+const static struct strtab plsmodetab[] = {
+  {"ROOT", DVB_PLS_ROOT},
+  {"GOLD", DVB_PLS_GOLD},
+  {"COMBO", DVB_PLS_COMBO},
+};
+dvb_str2val(plsmode);
 #undef dvb_str2val
+
+
+void
+dvb_mux_conf_init ( dvb_mux_conf_t *dmc, dvb_fe_delivery_system_t delsys )
+{
+  memset(dmc, 0, sizeof(*dmc));
+  dmc->dmc_fe_type      = dvb_delsys2type(delsys);
+  dmc->dmc_fe_delsys    = delsys;
+  dmc->dmc_fe_inversion = DVB_INVERSION_AUTO;
+  dmc->dmc_fe_pilot     = DVB_PILOT_AUTO;
+  dmc->dmc_fe_stream_id = DVB_NO_STREAM_ID_FILTER;
+  switch (dmc->dmc_fe_type) {
+  case DVB_TYPE_S:
+    dmc->u.dmc_fe_qpsk.orbital_pos = INT_MAX;
+    break;
+  default:
+    break;
+  }
+}
+
 
 static int
 dvb_mux_conf_str_dvbt ( dvb_mux_conf_t *dmc, char *buf, size_t bufsize )
 {
   return
   snprintf(buf, bufsize,
-           "%s freq %d bw %s cons %s hier %s code_rate %s:%s guard %s trans %s",
+           "%s freq %d bw %s cons %s hier %s code_rate %s:%s guard %s trans %s plp_id %d",
            dvb_delsys2str(dmc->dmc_fe_delsys),
            dmc->dmc_fe_freq,
            dvb_bw2str(dmc->u.dmc_fe_ofdm.bandwidth),
@@ -774,7 +803,8 @@ dvb_mux_conf_str_dvbt ( dvb_mux_conf_t *dmc, char *buf, size_t bufsize )
            dvb_fec2str(dmc->u.dmc_fe_ofdm.code_rate_HP),
            dvb_fec2str(dmc->u.dmc_fe_ofdm.code_rate_LP),
            dvb_guard2str(dmc->u.dmc_fe_ofdm.guard_interval),
-           dvb_mode2str(dmc->u.dmc_fe_ofdm.transmission_mode));
+           dvb_mode2str(dmc->u.dmc_fe_ofdm.transmission_mode),
+           dmc->dmc_fe_stream_id);
 }
 
 static int
@@ -794,20 +824,27 @@ static int
 dvb_mux_conf_str_dvbs ( dvb_mux_conf_t *dmc, char *buf, size_t bufsize )
 {
   const char *pol = dvb_pol2str(dmc->u.dmc_fe_qpsk.polarisation);
-  const char dir = dmc->u.dmc_fe_qpsk.orbital_dir;
+  const int satpos = dmc->u.dmc_fe_qpsk.orbital_pos;
+  char satbuf[16];
+  if (satpos != INT_MAX) {
+    snprintf(satbuf, sizeof(buf), "%d.%d%c ", abs(satpos) / 10, abs(satpos) % 10, satpos < 0 ? 'W' : 'E');
+  } else {
+    satbuf[0] = '\0';
+  }
   return
   snprintf(buf, bufsize,
-           "%s pos %d.%d%c freq %d %c sym %d fec %s mod %s roff %s",
+           "%s %sfreq %d %c sym %d fec %s mod %s roff %s is_id %d pls_mode %s pls_code %d",
            dvb_delsys2str(dmc->dmc_fe_delsys),
-           dmc->u.dmc_fe_qpsk.orbital_pos / 10,
-           dmc->u.dmc_fe_qpsk.orbital_pos % 10,
-           dir >= ' ' && dir <= 'z' ? dir : '?',
+           satbuf,
            dmc->dmc_fe_freq,
            pol ? pol[0] : 'X',
            dmc->u.dmc_fe_qpsk.symbol_rate,
            dvb_fec2str(dmc->u.dmc_fe_qpsk.fec_inner),
            dvb_qam2str(dmc->dmc_fe_modulation),
-           dvb_rolloff2str(dmc->dmc_fe_rolloff));
+           dvb_rolloff2str(dmc->dmc_fe_rolloff),
+           dmc->dmc_fe_stream_id,
+           dvb_plsmode2str(dmc->dmc_fe_pls_mode),
+           dmc->dmc_fe_pls_code);
 }
 
 static int
@@ -840,18 +877,6 @@ dvb_mux_conf_str ( dvb_mux_conf_t *dmc, char *buf, size_t bufsize )
     return
       snprintf(buf, bufsize, "UNKNOWN MUX CONFIG");
   }
-}
-
-int
-dvb_sat_position(const dvb_mux_conf_t *mc)
-{
-  int pos = mc->u.dmc_fe_qpsk.orbital_pos;
-  assert(mc->dmc_fe_type == DVB_TYPE_S);
-  if (!mc->u.dmc_fe_qpsk.orbital_dir)
-    return INT_MAX;
-  if (mc->u.dmc_fe_qpsk.orbital_dir == 'W')
-    return -pos;
-  return pos;
 }
 
 const char *
@@ -901,6 +926,9 @@ dvb_sat_position_from_str( const char *buf )
  */
 void dvb_init( void )
 {
+#if ENABLE_MPEGTS_DVB
+  satellites = hts_settings_load("satellites");
+#endif
 }
 
 void dvb_done( void )
@@ -908,4 +936,7 @@ void dvb_done( void )
   extern SKEL_DECLARE(mpegts_table_state_skel, struct mpegts_table_state);
 
   SKEL_FREE(mpegts_table_state_skel);
+#if ENABLE_MPEGTS_DVB
+  htsmsg_destroy(satellites);
+#endif
 }

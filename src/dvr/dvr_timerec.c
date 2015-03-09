@@ -155,7 +155,7 @@ dvr_timerec_check(dvr_timerec_entry_t *dte)
            dte->dte_creator ?: "");
   de = dvr_entry_create_(idnode_uuid_as_str(&dte->dte_config->dvr_id),
                          NULL, dte->dte_channel,
-                         start, stop, 0, 0, title,
+                         start, stop, 0, 0, title, NULL,
                          NULL, NULL, NULL, dte->dte_owner, buf,
                          NULL, dte, dte->dte_pri, dte->dte_retention,
                          dte->dte_comment);
@@ -183,7 +183,7 @@ dvr_timerec_create(const char *uuid, htsmsg_t *conf)
     return NULL;
   }
 
-  dte->dte_title = strdup("Time-%x-%R");
+  dte->dte_title = strdup("Time-%F_%R");
   dte->dte_weekdays = 0x7f;
   dte->dte_pri = DVR_PRIO_NORMAL;
   dte->dte_start = -1;
@@ -240,7 +240,10 @@ dvr_timerec_create_htsp(const char *dvr_config_name, const char *title,
   htsmsg_destroy(conf);
 
   if (dte)
+  {
     dvr_timerec_save(dte);
+    dvr_timerec_check(dte);
+  }
 
   return dte;
 }
@@ -554,7 +557,7 @@ const idclass_t dvr_timerec_entry_class = {
       .id       = "title",
       .name     = "Title",
       .off      = offsetof(dvr_timerec_entry_t, dte_title),
-      .def.s    = "Time-%x-%R",
+      .def.s    = "Time-%F_%R",
     },
     {
       .type     = PT_STR,

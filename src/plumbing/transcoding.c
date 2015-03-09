@@ -331,10 +331,10 @@ create_adts_header(pktbuf_t *pb, int sri, int channels)
    init_wbits(&bs, pktbuf_ptr(pb), 56);
 
    put_bits(&bs, 0xfff, 12); // Sync marker
-   put_bits(&bs, 1, 1);      // ID 0 = MPEG 4, 1 = MPEG 2
+   put_bits(&bs, 0, 1);      // ID 0 = MPEG 4, 1 = MPEG 2
    put_bits(&bs, 0, 2);      // Layer
    put_bits(&bs, 1, 1);      // Protection absent
-   put_bits(&bs, 2, 2);      // AOT, 2 = AAC LC (for MPEG 2 bit)
+   put_bits(&bs, 1, 2);      // AOT, 1 = AAC LC
    put_bits(&bs, sri, 4);
    put_bits(&bs, 1, 1);      // Private bit
    put_bits(&bs, channels, 3);
@@ -344,7 +344,7 @@ create_adts_header(pktbuf_t *pb, int sri, int channels)
    put_bits(&bs, 1, 1);      // Copyright identification bit
    put_bits(&bs, 1, 1);      // Copyright identification start
    put_bits(&bs, pktbuf_len(pb), 13);
-   put_bits(&bs, 0, 11);     // Buffer fullness
+   put_bits(&bs, 0x7ff, 11); // Buffer fullness
    put_bits(&bs, 0, 2);      // RDB in frame
 }
 
@@ -1027,9 +1027,16 @@ transcoder_stream_video(transcoder_t *t, transcoder_stream_t *ts, th_pkt_t *pkt)
     octx->width           = vs->vid_width  ? vs->vid_width  : ictx->width;
     octx->height          = vs->vid_height ? vs->vid_height : ictx->height;
     octx->gop_size        = 25;
-    octx->time_base.den   = 25;
-    octx->time_base.num   = 1;
     octx->has_b_frames    = ictx->has_b_frames;
+
+    // Encoder uses "time_base" for bitrate calculation, but "time_base" from decoder
+    // will be deprecated in the future, therefore calculate "time_base" from "framerate" if available.
+    octx->ticks_per_frame = ictx->ticks_per_frame;
+    if (ictx->framerate.num != 0 && ictx->framerate.den != 0) {
+      octx->time_base     = av_inv_q(av_mul_q(ictx->framerate, av_make_q(ictx->ticks_per_frame, 1)));
+    } else {
+      octx->time_base     = ictx->time_base;
+    }
 
     switch (ts->ts_type) {
     case SCT_MPEG2VIDEO:
@@ -1252,10 +1259,17 @@ static void
 transcoder_packet(transcoder_t *t, th_pkt_t *pkt)
 {
   transcoder_stream_t *ts;
+  streaming_message_t *sm;
 
   LIST_FOREACH(ts, &t->t_stream_list, ts_link) {
     if (pkt->pkt_componentindex == ts->ts_index) {
-      ts->ts_handle_pkt(t, ts, pkt);
+      if (pkt->pkt_payload) {
+        ts->ts_handle_pkt(t, ts, pkt);
+      } else {
+        sm = streaming_msg_create_pkt(pkt);
+        streaming_target_deliver2(ts->ts_target, sm);
+        pkt_ref_dec(pkt);
+      }
       return;
     }
   }

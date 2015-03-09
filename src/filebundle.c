@@ -24,7 +24,11 @@
 #include <string.h>
 #include <stdio.h>
 #if ENABLE_ZLIB
+#define ZLIB_CONST 1
 #include <zlib.h>
+#ifndef z_const
+#define z_const
+#endif
 #endif
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -78,18 +82,16 @@ static uint8_t *_fb_inflate ( const uint8_t *data, size_t size, size_t orig )
 {
   int err;
   z_stream zstr;
-  uint8_t *bufin, *bufout;
+  uint8_t *bufout;
 
   /* Setup buffers */
-  bufin  = malloc(size);
   bufout = malloc(orig);
-  memcpy(bufin, data, size);
 
   /* Setup zlib */
   memset(&zstr, 0, sizeof(zstr));
   inflateInit2(&zstr, 31);
   zstr.avail_in  = size;
-  zstr.next_in   = bufin;
+  zstr.next_in   = (z_const uint8_t *)data;
   zstr.avail_out = orig;
   zstr.next_out  = bufout;
     
@@ -99,7 +101,6 @@ static uint8_t *_fb_inflate ( const uint8_t *data, size_t size, size_t orig )
     free(bufout);
     bufout = NULL;
   }
-  free(bufin);
   inflateEnd(&zstr);
   
   return bufout;
@@ -111,18 +112,16 @@ static uint8_t *_fb_deflate ( const uint8_t *data, size_t orig, size_t *size )
 {
   int err;
   z_stream zstr;
-  uint8_t *bufin, *bufout;
+  uint8_t *bufout;
 
   /* Setup buffers */
-  bufin  = malloc(orig);
   bufout = malloc(orig);
-  memcpy(bufin, data, orig);
 
   /* Setup zlib */
   memset(&zstr, 0, sizeof(zstr));
   err = deflateInit2(&zstr, 9, Z_DEFLATED, 31, 9, Z_DEFAULT_STRATEGY);
   zstr.avail_in  = orig;
-  zstr.next_in   = bufin;
+  zstr.next_in   = (z_const uint8_t *)data;
   zstr.avail_out = orig;
   zstr.next_out  = bufout;
     
@@ -147,7 +146,6 @@ static uint8_t *_fb_deflate ( const uint8_t *data, size_t orig, size_t *size )
     }
     break;
   }
-  free(bufin);
   deflateEnd(&zstr);
   
   return bufout;

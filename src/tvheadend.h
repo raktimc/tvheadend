@@ -504,10 +504,10 @@ typedef struct streaming_queue {
  */
 typedef struct sbuf {
   uint8_t *sb_data;
-  int sb_ptr;
-  int sb_size;
-  unsigned int sb_err  : 1;
-  unsigned int sb_bswap: 1;
+  int      sb_ptr;
+  int      sb_size;
+  uint16_t sb_err;
+  uint8_t  sb_bswap;
 } sbuf_t;
 
 
@@ -659,12 +659,12 @@ void sbuf_reset_and_alloc(sbuf_t *sb, int len);
 static inline void sbuf_steal_data(sbuf_t *sb)
 {
   sb->sb_data = NULL;
-  sb->sb_ptr = sb->sb_size = 0;
+  sb->sb_ptr = sb->sb_size = sb->sb_err = 0;
 }
 
-static inline void sbuf_err(sbuf_t *sb)
+static inline void sbuf_err(sbuf_t *sb, int errors)
 {
-  sb->sb_err = 1;
+  sb->sb_err += errors;
 }
 
 void sbuf_alloc_(sbuf_t *sb, int len);

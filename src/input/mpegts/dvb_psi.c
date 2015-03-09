@@ -35,6 +35,8 @@
 
 #define PRIV_FSAT (('F' << 24) | ('S' << 16) | ('A' << 8) | 'T')
 
+#define DVB_FASTSCAN_MUXES (8192/UUID_HEX_SIZE)
+
 typedef struct dvb_freesat_svc {
   TAILQ_ENTRY(dvb_freesat_svc) link;
   TAILQ_ENTRY(dvb_freesat_svc) region_link;
@@ -117,6 +119,15 @@ dvb_servicetype_lookup ( int t )
   return -1;
 }
 
+static inline int
+mpegts_mux_alive(mpegts_mux_t *mm)
+{
+  /*
+   * Return, if mux seems to be alive for updating.
+   */
+  return !LIST_EMPTY(&mm->mm_services) && mm->mm_scan_result != MM_SCAN_FAIL;
+}
+
 static void
 dvb_bouquet_comment ( bouquet_t *bq, mpegts_mux_t *mm )
 {
@@ -129,6 +140,55 @@ dvb_bouquet_comment ( bouquet_t *bq, mpegts_mux_t *mm )
   bq->bq_comment = strdup(comment);
   bq->bq_saveflag = 1;
 }
+
+#if ENABLE_MPEGTS_DVB
+static mpegts_mux_t *
+dvb_fs_mux_find ( mpegts_mux_t *mm, uint16_t onid, uint16_t tsid )
+{
+  mpegts_mux_t *mux;
+  char *s;
+  int i;
+
+  if (mm->mm_fastscan_muxes == NULL)
+    return NULL;
+  for (i = 0; i < DVB_FASTSCAN_MUXES * UUID_HEX_SIZE; i += UUID_HEX_SIZE) {
+    s = mm->mm_fastscan_muxes + i;
+    if (s[0] == '\0')
+      return NULL;
+    mux = mpegts_mux_find(s);
+    if (mux && mux->mm_onid == onid && mux->mm_tsid == tsid)
+      return mux;
+  }
+  return NULL;
+}
+
+static void
+dvb_fs_mux_add ( mpegts_table_t *mt, mpegts_mux_t *mm, mpegts_mux_t *mux )
+{
+  const char *uuid;
+  char *s;
+  int i;
+
+  uuid = idnode_uuid_as_str(&mux->mm_id);
+  if (mm->mm_fastscan_muxes == NULL)
+    mm->mm_fastscan_muxes = calloc(DVB_FASTSCAN_MUXES, UUID_HEX_SIZE);
+  for (i = 0; i < DVB_FASTSCAN_MUXES * UUID_HEX_SIZE; i += UUID_HEX_SIZE) {
+    s = mm->mm_fastscan_muxes + i;
+    if (s[0] == '\0')
+      break;
+    if (strcmp(s, uuid) == 0)
+      return;
+  }
+  for (i = 0; i < DVB_FASTSCAN_MUXES * UUID_HEX_SIZE; i += UUID_HEX_SIZE) {
+    s = mm->mm_fastscan_muxes + i;
+    if (s[0] == '\0') {
+      strcpy(s, uuid);
+      return;
+    }
+  }
+  tvherror(mt->mt_name, "fastscan mux count overflow");
+}
+#endif
 
 /* **************************************************************************
  * Descriptors
@@ -151,8 +211,9 @@ static const dvb_fe_code_rate_t fec_tab [16] = {
  */
 static mpegts_mux_t *
 dvb_desc_sat_del
-  (mpegts_mux_t *mm, uint16_t onid, uint16_t tsid,
-   const uint8_t *ptr, int len )
+  (mpegts_table_t *mt, mpegts_mux_t *mm,
+   uint16_t onid, uint16_t tsid,
+   const uint8_t *ptr, int len, int force )
 {
   int frequency, symrate;
   dvb_mux_conf_t dmc;
@@ -169,21 +230,20 @@ dvb_desc_sat_del
     bcdtoint(ptr[7]) * 100000 + bcdtoint(ptr[8]) * 1000 + 
     bcdtoint(ptr[9]) * 10     + (ptr[10] >> 4);
   if (!frequency) {
-    tvhlog(LOG_WARNING, "nit", "dvb-s frequency error");
+    tvhlog(LOG_WARNING, mt->mt_name, "dvb-s frequency error");
     return NULL;
   }
   if (!symrate) {
-    tvhlog(LOG_WARNING, "nit", "dvb-s symbol rate error");
+    tvhlog(LOG_WARNING, mt->mt_name, "dvb-s symbol rate error");
     return NULL;
   }
 
-  memset(&dmc, 0, sizeof(dmc));
-  dmc.dmc_fe_type                = DVB_TYPE_S;
-  dmc.dmc_fe_pilot               = DVB_PILOT_AUTO;
-  dmc.dmc_fe_inversion           = DVB_INVERSION_AUTO;
+  dvb_mux_conf_init(&dmc, (ptr[6] & 0x4) ? DVB_SYS_DVBS2 : DVB_SYS_DVBS);
+
   dmc.dmc_fe_freq                = frequency;
   dmc.u.dmc_fe_qpsk.orbital_pos  = bcdtoint(ptr[4]) * 100 + bcdtoint(ptr[5]);
-  dmc.u.dmc_fe_qpsk.orbital_dir  = (ptr[6] & 0x80) ? 'E' : 'W';
+  if ((ptr[6] & 0x80) == 0)
+    dmc.u.dmc_fe_qpsk.orbital_pos *= -1;
   dmc.u.dmc_fe_qpsk.polarisation = (ptr[6] >> 5) & 0x03;
 
   dmc.u.dmc_fe_qpsk.symbol_rate  = symrate * 100;
@@ -195,7 +255,6 @@ dvb_desc_sat_del
   static int rtab[4] = {
     DVB_ROLLOFF_35, DVB_ROLLOFF_25, DVB_ROLLOFF_20, DVB_ROLLOFF_AUTO
   };
-  dmc.dmc_fe_delsys     = (ptr[6] & 0x4) ? DVB_SYS_DVBS2 : DVB_SYS_DVBS;
   dmc.dmc_fe_modulation = mtab[ptr[6] & 0x3];
   if (dmc.dmc_fe_modulation != DVB_MOD_NONE &&
       dmc.dmc_fe_modulation != DVB_MOD_QPSK)
@@ -205,16 +264,16 @@ dvb_desc_sat_del
   dmc.dmc_fe_rolloff    = rtab[(ptr[6] >> 3) & 0x3];
   if (dmc.dmc_fe_delsys == DVB_SYS_DVBS &&
       dmc.dmc_fe_rolloff != DVB_ROLLOFF_35) {
-    tvhwarn("nit", "dvb-s rolloff error");
+    tvhwarn(mt->mt_name, "dvb-s rolloff error");
     return NULL;
   }
 
   /* Debug */
   dvb_mux_conf_str(&dmc, buf, sizeof(buf));
-  tvhdebug("nit", "    %s", buf);
+  tvhdebug(mt->mt_name, "    %s", buf);
 
   /* Create */
-  return mm->mm_network->mn_create_mux(mm, onid, tsid, &dmc);
+  return mm->mm_network->mn_create_mux(mm, onid, tsid, &dmc, force);
 }
 
 /*
@@ -222,7 +281,8 @@ dvb_desc_sat_del
  */
 static mpegts_mux_t *
 dvb_desc_cable_del
-  (mpegts_mux_t *mm, uint16_t onid, uint16_t tsid,
+  (mpegts_table_t *mt, mpegts_mux_t *mm,
+   uint16_t onid, uint16_t tsid,
    const uint8_t *ptr, int len )
 {
   int frequency, symrate;
@@ -245,18 +305,16 @@ dvb_desc_cable_del
     bcdtoint(ptr[7]) * 100000 + bcdtoint(ptr[8]) * 1000 + 
     bcdtoint(ptr[9]) * 10     + (ptr[10] >> 4);
   if (!frequency) {
-    tvhwarn("nit", "dvb-c frequency error");
+    tvhwarn(mt->mt_name, "dvb-c frequency error");
     return NULL;
   }
   if (!symrate) {
-    tvhwarn("nit", "dvb-c symbol rate error");
+    tvhwarn(mt->mt_name, "dvb-c symbol rate error");
     return NULL;
   }
 
-  memset(&dmc, 0, sizeof(dmc));
-  dmc.dmc_fe_type            = DVB_TYPE_C;
-  dmc.dmc_fe_delsys          = DVB_SYS_DVBC_ANNEX_A;
-  dmc.dmc_fe_inversion       = DVB_INVERSION_AUTO;
+  dvb_mux_conf_init(&dmc, DVB_SYS_DVBC_ANNEX_A);
+
   dmc.dmc_fe_freq            = frequency * 100;
 
   dmc.u.dmc_fe_qam.symbol_rate  = symrate * 100;
@@ -268,10 +326,10 @@ dvb_desc_cable_del
 
   /* Debug */
   dvb_mux_conf_str(&dmc, buf, sizeof(buf));
-  tvhdebug("nit", "    %s", buf);
+  tvhdebug(mt->mt_name, "    %s", buf);
 
   /* Create */
-  return mm->mm_network->mn_create_mux(mm, onid, tsid, &dmc);
+  return mm->mm_network->mn_create_mux(mm, onid, tsid, &dmc, 0);
 }
 
 /*
@@ -279,7 +337,8 @@ dvb_desc_cable_del
  */
 static mpegts_mux_t *
 dvb_desc_terr_del
-  (mpegts_mux_t *mm, uint16_t onid, uint16_t tsid,
+  (mpegts_table_t *mt, mpegts_mux_t *mm,
+   uint16_t onid, uint16_t tsid,
    const uint8_t *ptr, int len )
 {
   static const dvb_fe_bandwidth_t btab [8] = {
@@ -316,16 +375,13 @@ dvb_desc_terr_del
   /* Extract data */
   frequency     = ((ptr[0] << 24) | (ptr[1] << 16) | (ptr[2] << 8) | ptr[3]);
   if (!frequency) {
-    tvhwarn("nit", "dvb-t frequency error");
+    tvhwarn(mt->mt_name, "dvb-t frequency error");
     return NULL;
   }
 
-  memset(&dmc, 0, sizeof(dmc));
-  dmc.dmc_fe_type             = DVB_TYPE_T;
-  dmc.dmc_fe_delsys           = DVB_SYS_DVBT;
-  dmc.dmc_fe_inversion        = DVB_INVERSION_AUTO;
-  dmc.dmc_fe_freq             = frequency * 10;
+  dvb_mux_conf_init(&dmc, DVB_SYS_DVBT);
 
+  dmc.dmc_fe_freq                         = frequency * 10;
   dmc.u.dmc_fe_ofdm.bandwidth             = btab[(ptr[4] >> 5) & 0x7];
   dmc.dmc_fe_modulation                   = ctab[(ptr[5] >> 6) & 0x3];
   dmc.u.dmc_fe_ofdm.hierarchy_information = htab[(ptr[5] >> 3) & 0x3];
@@ -336,10 +392,10 @@ dvb_desc_terr_del
 
   /* Debug */
   dvb_mux_conf_str(&dmc, buf, sizeof(buf));
-  tvhdebug("nit", "    %s", buf);
+  tvhdebug(mt->mt_name, "    %s", buf);
   
   /* Create */
-  return mm->mm_network->mn_create_mux(mm, onid, tsid, &dmc);
+  return mm->mm_network->mn_create_mux(mm, onid, tsid, &dmc, 0);
 }
  
 #endif /* ENABLE_MPEGTS_DVB */
@@ -563,7 +619,7 @@ dvb_freesat_add_service
   if (!fr->bouquet) {
     strcpy(name, "???");
     if (idnode_is_instance(&bi->mm->mm_id, &dvb_mux_dvbs_class))
-      dvb_sat_position_to_str(dvb_sat_position(&((dvb_mux_t *)bi->mm)->lm_tuning),
+      dvb_sat_position_to_str(((dvb_mux_t *)bi->mm)->lm_tuning.u.dmc_fe_qpsk.orbital_pos,
                               name, sizeof(name));
     snprintf(src, sizeof(src), "dvb-%s://dvbs,%s,%04X,%u",
              bi->freesat ? "freesat" : "bskyb", name, bi->nbid, fr->regionid);
@@ -1238,9 +1294,9 @@ dvb_bat_completed
       char src[64] = "";
       if (idnode_is_instance(&mux->mm_id, &dvb_mux_dvbs_class)) {
         dvb_mux_conf_t *mc = &((dvb_mux_t *)mux)->lm_tuning;
-        if (mc->u.dmc_fe_qpsk.orbital_dir) {
+        if (mc->u.dmc_fe_qpsk.orbital_pos != INT_MAX) {
           char buf[16];
-          dvb_sat_position_to_str(dvb_sat_position(mc), buf, sizeof(buf));
+          dvb_sat_position_to_str(mc->u.dmc_fe_qpsk.orbital_pos, buf, sizeof(buf));
           snprintf(src, sizeof(src), "dvb-bouquet://dvbs,%s,%04X,%04X", buf, tsid, bi->nbid);
         }
       } else if (idnode_is_instance(&mux->mm_id, &dvb_mux_dvbt_class)) {
@@ -1277,7 +1333,7 @@ complete:
 static int
 dvb_nit_mux
   (mpegts_table_t *mt, mpegts_mux_t *mux, mpegts_mux_t *mm,
-   mpegts_network_t *mn, uint16_t onid, uint16_t tsid,
+   uint16_t onid, uint16_t tsid,
    const uint8_t *lptr, int llen, uint8_t tableid,
    dvb_bat_id_t *bi, int discovery)
 {
@@ -1291,7 +1347,7 @@ dvb_nit_mux
   if (mux && !mux->mm_enabled)
     bi = NULL;
 
-  charset = dvb_charset_find(mn, mux, NULL);
+  charset = dvb_charset_find(mux ? mux->mm_network : mm->mm_network, mux, NULL);
 
   if (mux)
     mpegts_mux_nice_name(mux, buf, sizeof(buf));
@@ -1321,7 +1377,7 @@ dvb_nit_mux
         i++;
         }
       if (mt->mt_mux_cb[i].cb) {
-        if (mt->mt_mux_cb[i].cb(mt, mux, dtag, dptr, dlen))
+        if (mt->mt_mux_cb[i].cb(mt, mux, bi ? bi->nbid : 0, dtag, dptr, dlen))
           return -1;
         dtag = 0;
       }
@@ -1340,14 +1396,17 @@ dvb_nit_mux
     case DVB_DESC_TERR_DEL:
       if (discovery) {
         if (dtag == DVB_DESC_SAT_DEL)
-          mux = dvb_desc_sat_del(mm, onid, tsid, dptr, dlen);
+          mux = dvb_desc_sat_del(mt, mm, onid, tsid, dptr, dlen,
+                                 tableid == DVB_FASTSCAN_NIT_BASE);
         else if (dtag == DVB_DESC_CABLE_DEL)
-          mux = dvb_desc_cable_del(mm, onid, tsid, dptr, dlen);
+          mux = dvb_desc_cable_del(mt, mm, onid, tsid, dptr, dlen);
         else
-          mux = dvb_desc_terr_del(mm, onid, tsid, dptr, dlen);
+          mux = dvb_desc_terr_del(mt, mm, onid, tsid, dptr, dlen);
         if (mux) {
           mpegts_mux_set_onid(mux, onid);
           mpegts_mux_set_tsid(mux, tsid, 0);
+          if (tableid == DVB_FASTSCAN_NIT_BASE)
+            dvb_fs_mux_add(mt, mm, mux);
         }
       }
       break;
@@ -1366,12 +1425,10 @@ dvb_nit_mux
         return -1;
       break;
     case DVB_DESC_PRIVATE_DATA:
-#if ENABLE_MPEGTS_DVB
       if (dlen == 4) {
         priv = (dptr[0] << 24) | (dptr[1] << 16) | (dptr[2] << 8) | dptr[3];
         tvhtrace(mt->mt_name, "      private %08X", priv);
       }
-#endif
       break;
     case 0x81:
       if (priv == 0) goto lcn;
@@ -1521,12 +1578,10 @@ dvb_nit_callback
         // TODO: implement this?
         break;
       case DVB_DESC_PRIVATE_DATA:
-#if ENABLE_MPEGTS_DVB
         if (tableid == 0x4A && dlen == 4) {
           priv = (dptr[0] << 24) | (dptr[1] << 16) | (dptr[2] << 8) | dptr[3];
           tvhtrace(mt->mt_name, "    private %08X", priv);
         }
-#endif
         break;
       case DVB_DESC_FREESAT_REGIONS:
 #if ENABLE_MPEGTS_DVB
@@ -1566,16 +1621,26 @@ dvb_nit_callback
 
 #if ENABLE_MPEGTS_DVB
     /* Create new muxes (auto-discovery) */
-    r = dvb_nit_mux(mt, NULL, mm, mn, onid, tsid, lptr, llen, tableid, bi, 1);
+    r = dvb_nit_mux(mt, NULL, mm, onid, tsid, lptr, llen, tableid, bi, 1);
     if (r < 0)
       return r;
 #endif
 
     /* Find existing mux */
+#if ENABLE_MPEGTS_DVB
+    if (tableid == DVB_FASTSCAN_NIT_BASE) {
+      mux = dvb_fs_mux_find(mm, onid, tsid);
+      if (mux && (mm == mux || mpegts_mux_alive(mux))) {
+        r = dvb_nit_mux(mt, mux, mm, onid, tsid, lptr, llen, tableid, bi, 0);
+        if (r < 0)
+          return r;
+      }
+    } else
+#endif
     LIST_FOREACH(mux, &mn->mn_muxes, mm_network_link)
       if (mux->mm_onid == onid && mux->mm_tsid == tsid &&
-          (mm == mux || !LIST_EMPTY(&mux->mm_services))) {
-        r = dvb_nit_mux(mt, mux, mm, mn, onid, tsid, lptr, llen, tableid, bi, 0);
+          (mm == mux || mpegts_mux_alive(mux))) {
+        r = dvb_nit_mux(mt, mux, mm, onid, tsid, lptr, llen, tableid, bi, 0);
         if (r < 0)
           return r;
       }
@@ -1650,12 +1715,10 @@ dvb_sdt_mux
             return -1;
           break;
         case DVB_DESC_PRIVATE_DATA:
-#if ENABLE_MPEGTS_DVB
           if (dlen == 4) {
             priv = (dptr[0] << 24) | (dptr[1] << 16) | (dptr[2] << 8) | dptr[3];
             tvhtrace(mt->mt_name, "  private %08X", priv);
           }
-#endif
           break;
         case DVB_DESC_BSKYB_NVOD:
           if (priv == 2)
@@ -1767,7 +1830,7 @@ dvb_sdt_callback
   } else {
     LIST_FOREACH(mm, &mn->mn_muxes, mm_network_link)
       if (mm->mm_onid == onid && mm->mm_tsid == tsid &&
-          (mm == mm_orig || !LIST_EMPTY(&mm->mm_services))) {
+          (mm == mm_orig || mpegts_mux_alive(mm))) {
         r = dvb_sdt_mux(mt, mm, mm_orig, ptr, len, tableid);
         if (r)
           return r;
@@ -1836,8 +1899,7 @@ atsc_vct_callback
 
     /* Find mux */
     LIST_FOREACH(mm, &mn->mn_muxes, mm_network_link)
-      if (mm->mm_tsid == tsid &&
-          (mm == mm_orig || !LIST_EMPTY(&mm->mm_services))) {
+      if (mm->mm_tsid == tsid && (mm == mm_orig || mpegts_mux_alive(mm))) {
         /* Find the service */
         if (!(s = mpegts_service_find(mm, sid, 0, 1, &save)))
           continue;
@@ -1878,37 +1940,17 @@ dvb_bat_callback
 }
 
 #if ENABLE_MPEGTS_DVB
-/*
- * DVB fastscan table processing
- */
-int
-dvb_fs_sdt_callback
-  (mpegts_table_t *mt, const uint8_t *ptr, int len, int tableid)
+static int
+dvb_fs_sdt_mux
+  ( mpegts_table_t *mt, mpegts_mux_t *mm, mpegts_table_state_t *st,
+    const uint8_t *ptr, int len, int discovery )
 {
-  int r, sect, last, ver;
+  uint16_t onid, tsid, service_id;
   uint8_t dtag;
   int llen, dlen;
   const uint8_t *lptr, *dptr;
-  uint16_t nbid = 0, onid, tsid, service_id;
-  mpegts_mux_t     *mm = mt->mt_mux, *mux;
-  mpegts_network_t *mn = mm->mm_network;
-  mpegts_table_state_t  *st  = NULL;
-
-  /* Fastscan ID */
-  nbid = (ptr[0] << 8) | ptr[1];
-
-  /* Begin */
-  if (tableid != 0xBD)
-    return -1;
-  r = dvb_table_begin(mt, ptr, len, tableid, nbid, 7, &st, &sect, &last, &ver);
-  if (r == 0) {
-    mt->mt_working -= st->working;
-    st->working = 0;
-  }
-  if (r != 1) return r;
-  if (len < 5) return -1;
-  ptr += 5;
-  len -= 5;
+  mpegts_network_t *mn;
+  mpegts_mux_t *mux;
 
   while (len > 0) {
     const char *charset;
@@ -1925,21 +1967,38 @@ dvb_fs_sdt_callback
     /* (ptr[10] << 8) | ptr[12] - audio ecm pid */
     /* (ptr[14] << 8) | ptr[15] - pcr pid */
 
-    tvhdebug(mt->mt_name, "  service %04X (%d) onid %04X (%d) tsid %04X (%d)",
-             service_id, service_id, onid, onid, tsid, tsid);
-
     /* Initialise the loop */
     DVB_LOOP_INIT(ptr, len, 16, lptr, llen);
 
-    /* Find existing mux */
-    LIST_FOREACH(mux, &mn->mn_muxes, mm_network_link)
-      if (mux->mm_onid == onid && mux->mm_tsid == tsid)
-        break;
+    if (discovery) {
+      /* Descriptor loop */
+      DVB_DESC_EACH(lptr, llen, dtag, dlen, dptr) {
+        switch (dtag) {
+          case DVB_DESC_SAT_DEL:
+            tvhtrace(mt->mt_name, "    dtag %02X dlen %d (discovery) onid %04X (%d) tsid %04X (%d)",
+                     dtag, dlen, onid, onid, tsid, tsid);
+            mux = dvb_desc_sat_del(mt, mm, onid, tsid, dptr, dlen, 1);
+            if (mux) {
+              mpegts_mux_set_onid(mux, onid);
+              mpegts_mux_set_tsid(mux, tsid, 0);
+              dvb_fs_mux_add(mt, mm, mux);
+            }
+            break;
+        }
+      }
+      continue;
+    }
 
-    if (!mux) {
+    tvhdebug(mt->mt_name, "  service %04X (%d) onid %04X (%d) tsid %04X (%d)",
+             service_id, service_id, onid, onid, tsid, tsid);
+
+    /* Find existing mux */
+    mux = dvb_fs_mux_find(mm, onid, tsid);
+    if (mux == NULL) {
       tvhtrace(mt->mt_name, "    mux not found");
       continue;
     }
+    mn = mux->mm_network;
 
     /* Find service */
     s       = mpegts_service_find(mux, service_id, 0, 1, &save);
@@ -1953,13 +2012,6 @@ dvb_fs_sdt_callback
           if (dvb_desc_service(dptr, dlen, &stype, sprov,
                                sizeof(sprov), sname, sizeof(sname), charset))
             return -1;
-          break;
-        case DVB_DESC_SAT_DEL:
-          mux = dvb_desc_sat_del(mm, onid, tsid, dptr, dlen);
-          if (mux) {
-            mpegts_mux_set_onid(mux, onid);
-            mpegts_mux_set_tsid(mux, tsid, 0);
-          }
           break;
       }
     }
@@ -2014,6 +2066,41 @@ dvb_fs_sdt_callback
       mt->mt_flags |= MT_FASTSWITCH;
     }
   }
+
+  return 0;
+}
+
+
+/*
+ * DVB fastscan table processing
+ */
+int
+dvb_fs_sdt_callback
+  (mpegts_table_t *mt, const uint8_t *ptr, int len, int tableid)
+{
+  int r, sect, last, ver;
+  uint16_t nbid;
+  mpegts_mux_t *mm = mt->mt_mux;
+  mpegts_table_state_t  *st  = NULL;
+
+  /* Fastscan ID */
+  nbid = (ptr[0] << 8) | ptr[1];
+
+  /* Begin */
+  if (tableid != 0xBD)
+    return -1;
+  r = dvb_table_begin(mt, ptr, len, tableid, nbid, 7, &st, &sect, &last, &ver);
+  if (r == 0) {
+    mt->mt_working -= st->working;
+    st->working = 0;
+  }
+  if (r != 1) return r;
+  if (len < 5) return -1;
+  ptr += 5;
+  len -= 5;
+
+  dvb_fs_sdt_mux(mt, mm, st, ptr, len, 1);
+  dvb_fs_sdt_mux(mt, mm, st, ptr, len, 0);
 
   /* End */
   return dvb_table_end(mt, st, sect);
@@ -2294,7 +2381,7 @@ psi_parse_pmt
     case 0x06:
       /* 0x06 is Chinese Cable TV AC-3 audio track */
       /* but mark it so only when no more descriptors exist */
-      if (dllen > 1 || !mux || !mux->mm_pmt_06_ac3)
+      if (dllen > 1 || !mux || mux->mm_pmt_ac3 != MM_AC3_PMT_06)
         break;
       /* fall through to SCT_AC3 */
     case 0x81:
@@ -2336,7 +2423,7 @@ psi_parse_pmt
         break;
 
       case DVB_DESC_REGISTRATION:
-        if(dlen == 4 && 
+        if(mux->mm_pmt_ac3 != MM_AC3_PMT_N05 && dlen == 4 &&
            ptr[0] == 'A' && ptr[1] == 'C' && ptr[2] == '-' &&  ptr[3] == '3')
           hts_stream_type = SCT_AC3;
         /* seen also these formats: */
@@ -2535,8 +2622,8 @@ psi_tables_dvb ( mpegts_mux_t *mm )
   if (idnode_is_instance(&mm->mm_id, &dvb_mux_dvbs_class)) {
     dvb_mux_conf_t *mc = &((dvb_mux_t *)mm)->lm_tuning;
     if (mc->dmc_fe_type == DVB_TYPE_S)
-      dvb_fastscan_each(mm, dvb_sat_position(mc),
-                        mc->dmc_fe_freq, psi_tables_dvb_fastscan);
+      dvb_fastscan_each(mm, mc->u.dmc_fe_qpsk.orbital_pos,
+                        mc->dmc_fe_freq, mc->u.dmc_fe_qpsk.polarisation, psi_tables_dvb_fastscan);
   }
 #endif
 }
