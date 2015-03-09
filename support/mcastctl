@@ -87,7 +87,7 @@ def startFromFile(fileName, mux='pass', sid=None, msid=None):
 	i=0
 	for line in f:
 		i+=1
-		mcast_opts = line.split(',')
+		mcast_opts = [mopts.strip() for mopts in line.rstrip('\r\n').split(',')]
 		if mcast_opts and len(mcast_opts) > 5:
 			sid_opt = int(float(mcast_opts[4]))
 			if sid and sid != sid_opt:
