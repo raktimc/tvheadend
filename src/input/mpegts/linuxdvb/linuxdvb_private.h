@@ -91,7 +91,7 @@ struct linuxdvb_frontend
    */
   int                       lfe_fe_fd;
   pthread_t                 lfe_dvr_thread;
-  volatile int              lfe_running;
+  th_pipe_t                 lfe_dvr_pipe;
   pthread_mutex_t           lfe_dvr_lock;
   pthread_cond_t            lfe_dvr_cond;
  
