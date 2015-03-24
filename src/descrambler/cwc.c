@@ -482,9 +482,13 @@ cwc_send_msg(cwc_t *cwc, const uint8_t *msg, size_t len, int sid, int enq, uint1
     pthread_cond_signal(&cwc->cwc_writer_cond);
     pthread_mutex_unlock(&cwc->cwc_writer_mutex);
   } else {
-    if (tvh_write(cwc->cwc_fd, buf, len))
+    pthread_mutex_lock(&cwc->cwc_writer_mutex);
+    if (tvh_write(cwc->cwc_fd, buf, len)) {
       tvhlog(LOG_INFO, "cwc", "write error %s", strerror(errno));
-
+      // reconnect if the other end closed connection for some reason
+      if (errno == EPIPE) cwc->cwc_reconfigure = 1;
+    }
+    pthread_mutex_unlock(&cwc->cwc_writer_mutex);
     free(cm);
   }
   return seq & 0xffff;
@@ -1179,7 +1183,7 @@ cwc_thread(void *aux)
 
     pthread_mutex_unlock(&cwc->cwc_mutex);
 
-    fd = tcp_connect(hostname, port, NULL, errbuf, sizeof(errbuf), 10);
+    fd = tcp_connect(hostname, port, NULL, errbuf, sizeof(errbuf), 30);
 
     pthread_mutex_lock(&cwc->cwc_mutex);
 
